@@ -1,0 +1,2608 @@
+---
+title: "Seurat2Output_GITHUB_FINAL"
+date: "9/21/2022"
+author: "HDR"
+output: html_document
+---
+
+LIBRARIES 
+```{r}
+library(Seurat)
+library(SeuratData)
+library(SeuratWrappers)
+library(rliger)
+library(patchwork)
+library(warrenlabSC)
+library(ggplot2)
+library(cowplot)
+library(EnhancedVolcano)
+library(ggpubr)
+library(dplyr)
+library(ComplexHeatmap)
+library(gprofiler2)
+library(circlize)
+library(SingleR)
+library(celldex)
+library(edgeR)
+library(reshape)
+library(tidyverse)
+library(plyr)
+library(RColorBrewer)
+library(ggpubr)
+library(gridExtra)
+library(metap)
+library(eulerr)
+library(Matrix)
+library(DropletUtils)
+library(batchelor)
+library(miceadds)
+require(scater)
+require(scran)
+require(BiocParallel)
+require(BiocNeighbors)
+require(data.table)
+library(monocle3)
+library(enrichplot)
+library(DOSE) 
+library(CellChat)
+library(nichenetr)
+```
+
+SEURAT OBJECT CREATION
+```{r}
+#Load the filtered_feature_bc_matrix output from CellRanger AGGR
+data <- Read10X(data.dir = "path")
+#Initialize the Seurat object with the raw (non-normalized) data
+object <- CreateSeuratObject(counts = data, project= "integration", min.cells = 2, min.features = 200)
+#add percent_mt to metadata as quality metric 
+object[["percent_mt"]] <- PercentageFeatureSet(object, pattern = "^MT-")
+#add meta.data from the aggregation.csv output from CellRanger AGGR
+meta.data <- read.csv("path")
+object <- add.meta.data(object, meta.data)
+#remove molecule_h5 column to reduce matrix size if desired 
+object@meta.data$molecule_h5 <- NULL
+#visualize quality metrics
+VlnPlot(object, features = "nFeature_RNA", group.by = "sample_id", pt.size = 0)+theme(axis.text.x = element_text(size = 6))
+VlnPlot(object, features = "percent_mt", group.by = "sample_id", pt.size = 0)+theme(axis.text.x = element_text(size = 6))
+#subset seurat object based on quality metrics 
+object <- subset(object, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent_mt < 12)
+table(object@meta.data$sample_id)
+#integrate 
+# split the dataset into a list of seurat objects by 10X well 
+list <- SplitObject(object, split.by = "sample_id")
+# normalize and identify variable features for each dataset independently
+list <- lapply(X = list, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = list)
+#find anchors 
+anchors <- FindIntegrationAnchors(object.list = list, anchor.features = features)
+#this command creates an 'integrated' data assay
+combined <- IntegrateData(anchorset = anchors)
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(combined) <- "integrated"
+# Run the standard workflow for visualization and clustering
+combined <- ScaleData(combined, verbose = FALSE)
+combined <- RunPCA(combined, npcs = 30, verbose = FALSE)
+combined <- RunUMAP(combined, reduction = "pca", dims = 1:30)
+combined <- FindNeighbors(combined, reduction = "pca", dims = 1:30)
+combined <- FindClusters(combined, resolution = 0.5)
+#scale RNA assay
+DefaultAssay(combined) <- "RNA"
+combined <- ScaleData(combined, assay = "RNA")
+#Save seurat object 
+save(combined,file="combined.RData")
+```
+
+LOAD DATA 1
+```{r}
+#load seurat object
+load(file = "combined.RData")
+```
+
+MANUAL CELLTYPING
+```{r}
+DefaultAssay(combined) <- "RNA"
+#PROG
+PROG_Markers <- c('NES','PAX6','SOX2',"SOX1")
+pdf(paste0("PROG_feature.pdf"))
+FeaturePlot(combined, features = PROG_Markers, combine = TRUE, order = F, raster = F) +theme(text = element_text(face = "bold"))
+dev.off()
+combined <- AddModuleScore(object=combined, features = PROG_Markers, ctrl = 5, name = "PROGfeatures")
+pdf(paste0("module_PROG_feature.pdf"))
+FeaturePlot(combined, features = "PROGfeatures1", min.cutoff = 0, order = T, raster = F)+ labs(title = "PROG Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+#CYC
+CYC_Markers <- c("CENPF","TOP2A","HMGB2","UBE2C")
+pdf(paste0("CYC_feature.pdf"))
+FeaturePlot(combined, features = CYC_Markers, combine = TRUE, order = F, raster = F)+theme(text = element_text(face = "bold"))
+dev.off()
+combined <- AddModuleScore(object=combined, features = CYC_Markers, ctrl = 5, name = "CYCfeatures")
+pdf(paste0("module_CYC_feature.pdf"))
+FeaturePlot(combined, features = "CYCfeatures1", min.cutoff = 0, order = T, raster = F)+ labs(title = "CYC Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+#NEU
+NEU_Markers <- c("GAP43",'SNAP25','MAPT','STMN2')
+pdf(paste0("NEU_feature.pdf"))
+FeaturePlot(combined, features = NEU_Markers, combine = TRUE, order = F, raster = F)+theme(text = element_text(face = "bold"))
+dev.off()
+combined <- AddModuleScore(object=combined, features = NEU_Markers, ctrl = 5, name = "NEUfeatures")
+pdf(paste0("module_NEU_feature.pdf"))
+FeaturePlot(combined, features = "NEUfeatures1", min.cutoff = 0, order = T, raster = F) + labs(title = "PAN_NEU Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+#EXCITATORY 
+GLU_Markers <- c("NEFM","ONECUT2", "GRID2","GRIA4","SLC17A6","GRIN2A")
+pdf(paste0("GLU_feature.pdf"))
+FeaturePlot(combined, features = GLU_Markers, combine = TRUE, order = T, raster = F)+theme(text = element_text(face = "bold"))
+dev.off()
+combined <- AddModuleScore(object=combined, features = GLU_Markers, ctrl = 5, name = "GLUfeatures")
+pdf(paste0("module_GLU_feature.pdf"))
+FeaturePlot(combined, features = "GLUfeatures1", min.cutoff = 0, order = T, raster = F)+ labs(title = "EX_NEU Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+#INHIBITORY 
+GABA_Markers <- c("GAD1","GAD2","SLC32A1","CNR1")
+pdf(paste0("GABA_feature.pdf"))
+FeaturePlot(combined, features = GABA_Markers, combine = TRUE, order = T, raster = F)+theme(text = element_text(face = "bold"))
+dev.off()
+combined<- AddModuleScore(object=combined, features = GABA_Markers, ctrl = 5, name = "GABAfeatures")
+pdf(paste0("module_GABA_feature.pdf"))
+FeaturePlot(combined, features = "GABAfeatures1", min.cutoff = 0, order = T, raster = F) + labs(title = "IN_NEU Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+#ASC
+ASC_Markers <- c("SLC1A3","VIM","SPARC","PEA15","VCAM1","CLU")
+pdf(paste0("ASC_feature.pdf"))
+FeaturePlot(combined, features = ASC_Markers, combine = TRUE, order = F, raster = F)+theme(text = element_text(face = "bold"))
+dev.off()
+combined <- AddModuleScore(object=combined, features = ASC_Markers, ctrl = 5, name = "ASCfeatures")
+pdf(paste0("module_ASC_feature.pdf"))
+FeaturePlot(combined, features = "ASCfeatures1", min.cutoff = 0, order = T, raster = F)+ labs(title = "ASC Markers")+theme(text = element_text(face = "bold"))
+dev.off()
+```
+
+AUTOMATED CELLTYPING
+```{r}
+#Get data from seurat object
+counts <- GetAssayData(combined)
+#For human data, call the human primary cell altas as reference from celldex, can use blueprint for Blueprint Epigenomics and Encode data set.
+#Can use immgen and mouse.rnaseq for mouse data as well. Check documentation.
+hpca.se <- HumanPrimaryCellAtlasData()
+#can check whats in the reference by 
+#hpca.se$label.main
+#hpca.se$label.fine
+#Set default assay
+DefaultAssay(combined)
+#Use the human cell altas as reference to assign main label cell (broad cell type) type to Seurat object
+#pbmc_hpca <- SingleR(test=counts, ref= hpca.se, labels = hpca.se$label.main,assay.type.test="intergrated")
+#Use the human cell altas as reference to assign fine label cell (fine cell type) type to Seurat object
+pbmc_hpca <- SingleR(test=counts, ref= hpca.se, labels = hpca.se$label.fine,assay.type.test="intergrated")
+combined <- AddMetaData(object = combined, metadata = pbmc_hpca$first.labels , col.name = "SingleR_Celltype")
+#check what has been assigned to each cell in table format
+table(combined@meta.data$seurat_clusters,combined@meta.data$SingleR_Celltype)
+#plot
+combined.active <- SetIdent(combined, value= "SingleR_Celltype")
+pdf(paste0("SingleR_Celltype_fine.pdf"), width = 20, height = 20)
+DimPlot(combined.active,  shuffle = T, raster = F)
+dev.off()
+```
+
+CELLTYPE DOCUMENTATION 
+```{r}
+#celltype assignment 
+Idents(combined)<- combined$seurat_clusters 
+combined <- RenameIdents(combined, `0` = "IN_NEU", `1` = "ASC", `2` = "IN_NEU", `3` = "EX_NEU", `4` = "NEU_X", `5` = "ASC", `6` = "EX_NEU", `7` = "IN_NEU", `8` = "NEU_X", `9` = "EX_NEU",  `10` = "NEU_P", `11` = "EX_NEU", `12` = "ASC", `13` = "IN_NEU", `14` = "NEU_P", `15` = "NEU_P", `16` = "ASC_P",`17` = "ASC_P", `18` = "ASC", `19` = "NEU_P",`20` = "IN_NEU",`21` = "ASC_P")
+combined$celltype <- Idents(combined)
+#new metadata columns 
+combined$celltype.sample <- paste(combined$celltype, combined$sample_id, sep = "_")
+combined$celltype.condition <- paste(combined$celltype, combined$condition, sep = "_")
+combined$celltype.batch <- paste(combined$celltype, combined$batch, sep = "_")
+combined$celltype.week <- paste(combined$celltype, combined$week, sep = "_")
+combined$celltype.treat <- paste(combined$celltype, combined$treatment, sep = "_")
+combined$condition.treat <- paste(combined$condition, combined$treatment, sep = "_")
+combined$condition.treat.week <- paste(combined$condition, combined$treatment,combined$week, sep = "_")
+combined$celltype.batch.condition <- paste(combined$celltype, combined$batch, combined$condition, sep = "_")
+combined$celltype.condition.week.treat <- paste(combined$celltype, combined$condition,combined$week,combined$treatment,sep = "_")
+
+#Save named seurat object
+save(combined,file="combined_named.RData")
+```
+
+LOAD DATA2
+```{r}
+#load seurat object
+load(file = "combined_named.RData")
+
+##DEFINE COLORS AND PALETTES##
+#celltype colors 
+col_EX_NEU <-  "aquamarine4"  
+col_IN_NEU <- "aquamarine3" 
+col_NEU_P <- "aquamarine1"
+col_NEU_X <-"azure1"
+col_ASC <-"tomato4"
+col_ASC_P <-"tomato2" 
+col_ASC_X <-"azure2" 
+col_CYC <-"gold1"
+#conditions colors
+col_ctr_v_w1<- "#DEEBF7"
+col_ctr_v_w2<- "#6BAED6"
+col_ctr_v_w3<- "#084594"
+col_otau_v_w1<-  "#FDD0A2"
+col_otau_v_w2<- "#FD8D3C"
+col_otau_v_w3<- "#D94801"
+col_asyn_v_w3<- "#FCBBA1" 
+col_ctr_pu_w2<- "#74C476"
+col_ctr_pu_w3<- "#238B45"
+col_otau_pu_w2<- "#9E9AC8"
+col_otau_pu_w3<- "#6A51A3"
+#color  palettes 
+cellcolors <- c(col_ASC_P,col_ASC,col_NEU_P,col_EX_NEU,col_IN_NEU,col_NEU_X)
+label_colors_ctr <- c(col_ctr_v_w1,col_ctr_v_w2,col_ctr_v_w3)
+condition_treat_week_colors <- c(col_ctr_v_w1,col_otau_v_w1,col_ctr_v_w2,col_otau_v_w2,col_ctr_v_w3,col_otau_v_w3,col_ctr_pu_w2,col_otau_pu_w2,col_ctr_pu_w3,col_otau_pu_w3,col_asyn_v_w3)
+condition_treat_week_colors_otau_only <- c(col_ctr_v_w1,col_otau_v_w1,col_ctr_v_w2,col_otau_v_w2,col_ctr_v_w3,col_otau_v_w3,col_ctr_pu_w2,col_otau_pu_w2,col_ctr_pu_w3,col_otau_pu_w3)
+condition_treat_week_colors_otau_vehicle_only <- c(col_ctr_v_w1,col_otau_v_w1,col_ctr_v_w2,col_otau_v_w2,col_ctr_v_w3,col_otau_v_w3)
+condition_treat_week_colors_ctr_vehicle_only <- c(col_ctr_v_w1,col_ctr_v_w2,col_ctr_v_w3)
+#label palettes
+cond_labels_all <- c("7 DIV3D Control Vehicle","7 DIV3D oTAU Vehicle","14 DIV3D Control Vehicle","14 DIV3D oTAU Vehicle","21 DIV3D Control Vehicle","21 DIV3D oTAU Vehicle","14 DIV3D Control PU","14 DIV3D oTAU PU","21 DIV3D Control PU","21 DIV3D oTAU PU","21 DIV3D aSYN-PFF Vehicle")
+cond_labels_otau_only <- c("7 DIV3D Control Vehicle","7 DIV3D oTAU Vehicle","14 DIV3D Control Vehicle","14 DIV3D oTAU Vehicle","21 DIV3D Control Vehicle","21 DIV3D oTAU Vehicle","14 DIV3D Control PU","14 DIV3D oTAU PU","21 DIV3D Control PU","21 DIV3D oTAU PU")
+cond_labels_otau_vehicle_only <- c("7 DIV3D Control Vehicle","7 DIV3D oTAU Vehicle","14 DIV3D Control Vehicle","14 DIV3D oTAU Vehicle","21 DIV3D Control Vehicle","21 DIV3D oTAU Vehicle")
+cond_labels_ctr_vehicle_only <- c("7 DIV3D Control Vehicle","14 DIV3D Control Vehicle","21 DIV3D Control Vehicle")
+sample_id_labels <-  c("Rep1 7 DIV3D Control Vehicle","Rep1 7 DIV3D oTAU Vehicle","Rep1 14 DIV3D Control Vehicle","Rep1 14 DIV3D oTAU Vehicle","Rep1 21 DIV3D Control Vehicle","Rep1 21 DIV3D oTAU Vehicle","Rep1 14 DIV3D Control PU","Rep1 14 DIV3D oTAU PU","Rep1 21 DIV3D Control PU","Rep1 21 DIV3D oTAU PU","Rep2 7 DIV3D Control Vehicle","Rep2 7 DIV3D oTAU Vehicle","Rep2 14 DIV3D Control Vehicle","Rep2 14 DIV3D oTAU Vehicle","Rep3 21 DIV3D Control Vehicle","Rep3 21 DIV3D oTAU Vehicle","Rep4 21 DIV3D Control Vehicle","Rep4 21 DIV3D oTAU Vehicle","Rep4 21 DIV3D PFFaSYN Vehicle","Rep5 21 DIV3D Control Vehicle","Rep5 21 DIV3D oTAU Vehicle")
+#cell subset palettes
+condition_treat_week_cells_otau_only <- c("ctr_v_w1","otau_v_w1","ctr_v_w2","otau_v_w2","ctr_v_w3","otau_v_w3","ctr_pu_w2","otau_pu_w2","ctr_pu_w3","otau_pu_w3")
+condition_treat_week_cells_otau_vehicle_only <- c("ctr_v_w1","otau_v_w1","ctr_v_w2","otau_v_w2","ctr_v_w3","otau_v_w3")
+condition_treat_week_cells_ctr_vehicle_only <- c("ctr_v_w1","ctr_v_w2","ctr_v_w3")
+
+##RELEVEL##
+#celltype
+Idents(combined) <- "celltype"
+# Define an order of cluster identities
+cell_levels <- c("ASC_P","ASC","NEU_P","EX_NEU","IN_NEU","NEU_X")
+# Relevel object@ident
+combined@meta.data$celltype <- factor(x = combined@meta.data$celltype, levels = cell_levels)
+
+#condition.treat.week
+Idents(combined) <- "condition.treat.week"
+# Define an order of cluster identities
+condition_treat_week_levels <- c("ctr_v_w1","otau_v_w1","ctr_v_w2","otau_v_w2","ctr_v_w3","otau_v_w3","ctr_pu_w2","otau_pu_w2","ctr_pu_w3","otau_pu_w3","asyn_v_w3")
+# Relevel object@ident
+combined@meta.data$condition.treat.week <- factor(x = combined@meta.data$condition.treat.week, levels = condition_treat_week_levels)
+
+#sample_id
+Idents(combined) <- "sample_id"
+# Define an order of cluster identities
+sample_id_levels <-  c("b1_w1_ctr_v","b1_w1_otau_v","b1_w2_ctr_v","b1_w2_otau_v","b1_w3_ctr_v","b1_w3_otau_v","b1_w2_ctr_pu","b1_w2_otau_pu","b1_w3_ctr_pu","b1_w3_otau_pu","b2_w1_ctr_v", "b2_w1_otau_v","b2_w2_ctr_v","b2_w2_otau_v","b3_w3_ctr_v","b3_w3_otau_v","b4_ctr_v","b4_otau_v","b4_asyn_v", "b5_w3_ctr_v", "b5_w3_otau_v")
+# Relevel object@ident
+combined@meta.data$sample_id <- factor(x = combined@meta.data$sample_id, levels = sample_id_levels)
+
+#week
+Idents(combined) <- "week"
+# Define an order of cluster identities
+week_levels <- c("w1","w2","w3")
+# Relevel object@ident
+combined@meta.data$week <- factor(x = combined@meta.data$week, levels = week_levels)
+
+```
+
+CELLTYPE HEATMAP
+```{r}
+combined <- SetIdent(combined, value ="celltype")
+markers <- FindAllMarkers(combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(markers, paste0("celltype_markers_2.rds"))
+write.csv(markers, file = "celltype_markers_2.csv")
+markers <- read.delim2(file = "celltype_markers_2.csv", sep = ",")
+top10 <- group_by(markers,cluster)
+top10 <- top_n(top10, n = 20, wt = avg_log2FC)
+plot <- DoHeatmap(subset(combined, downsample=1000), features = top10$gene, size = 0, angle = 0, hjust = 0.5, label = TRUE, group.by = "celltype", assay = "RNA", slot = "scale.data", group.colors = cellcolors,draw.lines = T) + theme(axis.text.y = element_text(size = 2))
+pdf("celltype_heatmap_2.pdf")
+print(plot)
+dev.off()
+```
+
+UMAP VISUALIZATIONS
+```{r}
+#set integrated default assay 
+DefaultAssay(combined) <- "integrated"
+#seurat clusters 
+pdf("cluster_umap.pdf")
+DimPlot(combined, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE, label.size = 8, raster = F)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15) )
+dev.off()
+#celltypes 
+pdf("celltype_umap.pdf")
+DimPlot(combined, label = TRUE, cols = cellcolors, group.by = "celltype", label.size = 8, raster = F)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))
+dev.off()
+#conditions 
+#all conditions 
+pdf("condition_umap_all.pdf")
+DimPlot(combined, reduction = "umap", group.by = "condition.treat.week", shuffle = TRUE, raster=F)+scale_color_manual(labels= cond_labels_all,values= condition_treat_week_colors)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))
+dev.off()
+#otau only  
+Idents(combined) <- "condition.treat.week"
+sub_combined <- subset(combined,idents=condition_treat_week_cells_otau_only)
+pdf("condition_umap_otau_only.pdf")
+DimPlot(sub_combined, reduction = "umap",group.by = "condition.treat.week",shuffle = TRUE, raster=F)+scale_color_manual(labels= cond_labels_otau_only,values= condition_treat_week_colors_otau_only)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))
+dev.off()
+#otau vehicle only  
+Idents(combined) <- "condition.treat.week"
+sub_combined <- subset(combined,idents=condition_treat_week_cells_otau_vehicle_only)
+pdf("condition_umap_otau_vehicle_only.pdf")
+DimPlot(sub_combined, reduction = "umap",group.by = "condition.treat.week",shuffle = TRUE, raster=F)+scale_color_manual(labels= cond_labels_otau_vehicle_only,values= condition_treat_week_colors_otau_vehicle_only)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))
+dev.off()
+#ctr vehicle only  
+Idents(combined) <- "condition.treat.week"
+sub_combined <- subset(combined,idents=condition_treat_week_cells_ctr_vehicle_only)
+pdf("condition_umap_ctr_vehicle_only.pdf")
+DimPlot(sub_combined, reduction = "umap",group.by = "condition.treat.week",shuffle = TRUE, raster=F)+scale_color_manual(labels= cond_labels_ctr_vehicle_only,values= condition_treat_week_colors_ctr_vehicle_only)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))
+dev.off()
+#maturation gradient 
+Idents(combined) <- "week"
+pdf("maturation_gradient_umap.pdf")
+DimPlot(combined, label = F, shuffle = T, raster = F)+theme(text = element_text(face = "bold"),title = element_text(size = 0), axis.text = element_text(size = 15)) +
+  scale_color_manual(labels = c("DIV3D 7", "DIV3D 14", "DIV3D 21"),  values = c("yellow","red","purple") )
+dev.off()
+#naturation legend
+col_fun = colorRamp2(c(7,14,21), c("yellow","red","purple"))
+lgd = Legend(col_fun = col_fun, title = "Maturity", at = c(7,14,21),labels = c("low", "median", "high"), direction = "horizontal")
+pdf("legend_maturity.pdf")
+draw(lgd)
+dev.off()
+#Feature Plots 
+DefaultAssay(combined) <- "RNA"
+genes <- c("VIM","SLC1A3","SOX2","MAP2","NES","TOP2A","GAD1","GRIA4","SYP","SYN1","DLG4","VAMP2","SNAP25","nFeature_RNA","nCount_RNA","percent_mt")
+for(gn in genes){
+plot<- FeaturePlot(combined, features=gn, order = T, raster = F)+theme(text = element_text(face = "bold"))
+pdf(paste0(gn,"_featureplot.pdf"))
+print(plot)
+dev.off()
+}
+#VLN Plots
+p <- VlnPlot(combined, features = "nFeature_RNA", group.by = "sample_id", pt.size = 0, y.max = 5000)+ NoLegend()+scale_x_discrete(labels=sample_id_labels)+theme(text = element_text(face = "bold"),axis.title.x = element_text(size = 0), axis.text = element_text(size = 10, face = "bold"), axis.text.x.bottom = element_text(angle = 90)) 
+pdf("nFeature_vln.pdf")
+plot(p)
+dev.off()
+p <- VlnPlot(combined, features = "nCount_RNA", group.by = "sample_id", pt.size = 0, y.max =15000)+ NoLegend()+scale_x_discrete(labels=sample_id_labels)+theme(text = element_text(face = "bold"),axis.title.x = element_text(size = 0), axis.text = element_text(size = 10, face = "bold"), axis.text.x.bottom = element_text(angle = 90)) 
+pdf("nCount_vln.pdf")
+plot(p)
+dev.off()
+p <- VlnPlot(combined, features = "percent_mt", group.by = "sample_id", pt.size = 0, y.max =20)+ NoLegend()+scale_x_discrete(labels=sample_id_labels)+theme(text = element_text(face = "bold"),axis.title.x = element_text(size = 0), axis.text = element_text(size = 10, face = "bold"), axis.text.x.bottom = element_text(angle = 90)) 
+pdf("percent_mt_vln.pdf")
+plot(p)
+dev.off()
+```
+
+CELLTYPE BARPLOT
+```{r}
+#ALL
+#dataframe setup
+combined <- SetIdent(combined, value ="celltype")
+ident <- c("ctr_v_w1","otau_v_w1","ctr_v_w2","otau_v_w2","ctr_v_w3","otau_v_w3","ctr_pu_w2","otau_pu_w2","ctr_pu_w3","otau_pu_w3")
+ns<-length(ident)
+clusters<-levels(combined)
+ncl<-length(clusters)
+counts<-matrix(0,nrow=ncl,ncol=ns)
+rownames(counts)<-clusters
+colnames(counts)<-ident
+#count per celltype
+for (s in ident) {
+  for (cl in clusters) {
+    counts[cl,s]<-sum(combined@meta.data$condition.treat.week==s & combined@meta.data$celltype==cl)
+  }
+}
+barplot_label_colors <- c(col_otau_pu_w3,col_ctr_pu_w3,col_otau_pu_w2,col_ctr_pu_w2,col_otau_v_w3,col_ctr_v_w3,col_otau_v_w2,col_ctr_v_w2,col_otau_v_w1,col_ctr_v_w1)
+colnames(counts) <- c("7     -     -","7     +     -","14     -     -","14     +     -","21     -     -","21     +     -","14     -     +","14     +     +","21     -     +","21     +     +")
+counts <- counts[,order(ncol(counts):1)]
+counts <- prop.table(counts,margin = 2)
+counts <- counts*100
+counts <- as.data.frame(counts)
+counts$ID <- rownames(counts)
+counts.melt <- melt(counts, id.var = 'ID')
+counts.melt <- within(counts.melt, ID <- factor(ID,
+    cell_levels, ordered = TRUE))
+labelcolors <- "black"
+barfill <- cellcolors
+plot<- ggplot(counts.melt, aes(y = variable, x = value, fill = ID,)) +
+    geom_bar(stat = 'identity', width = 0.5,colour="black") +
+  scale_fill_manual(values = barfill )+
+    theme(text = element_text(face = "bold"),aspect.ratio = .8,legend.title=element_blank(),
+          legend.text = element_text(size=18),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(), axis.text.x = element_blank(),
+          axis.text.y = element_text(color = labelcolors,face = "bold",size = 15),
+          axis.ticks = element_blank(),panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank())
+pdf("all_cellcount_barplot.pdf", width = 5, height = 2.5)
+print(plot)
+dev.off()
+
+#VEHICLE ONLY
+#dataframe setup
+combined <- SetIdent(combined, value ="celltype")
+ident <- c("ctr_v_w1","otau_v_w1","ctr_v_w2","otau_v_w2","ctr_v_w3","otau_v_w3")
+ns<-length(ident)
+clusters<-levels(combined)
+ncl<-length(clusters)
+counts<-matrix(0,nrow=ncl,ncol=ns)
+rownames(counts)<-clusters
+colnames(counts)<-ident
+#count per celltype
+for (s in ident) {
+  for (cl in clusters) {
+    counts[cl,s]<-sum(combined@meta.data$condition.treat.week==s & combined@meta.data$celltype==cl)
+  }
+}
+barplot_label_colors <- c(col_otau_v_w3,col_ctr_v_w3,col_otau_v_w2,col_ctr_v_w2,col_otau_v_w1,col_ctr_v_w1)
+colnames(counts) <- c("7     -","7     +","14     -","14     +","21     -","21     +")
+counts <- counts[,order(ncol(counts):1)]
+counts <- prop.table(counts,margin = 2)
+counts <- counts*100
+counts <- as.data.frame(counts)
+counts$ID <- rownames(counts)
+counts.melt <- melt(counts, id.var = 'ID')
+counts.melt <- within(counts.melt, ID <- factor(ID,
+    cell_levels, ordered = TRUE))
+labelcolors <- "black"
+barfill <- cellcolors
+plot<- ggplot(counts.melt, aes(y = variable, x = value, fill = ID,)) +
+    geom_bar(stat = 'identity', width = 0.5,colour="black") +
+  scale_fill_manual(values = barfill )+
+    theme(text = element_text(face = "bold"),aspect.ratio = .8,legend.title=element_blank(),
+          legend.text = element_text(size=10),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(), axis.text.x = element_blank(),
+          axis.text.y = element_text(color = labelcolors,face = "bold",size = 10),
+          axis.ticks = element_blank(),panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank())
+pdf("vehicle_cellcount_barplot.pdf", width = 5, height = 2.5)
+print(plot)
+dev.off()
+
+#CONTROL
+#dataframe setup
+combined <- SetIdent(combined, value ="celltype")
+ident <- c("ctr_v_w1","ctr_v_w2","ctr_v_w3")
+ns<-length(ident)
+clusters<-levels(combined)
+ncl<-length(clusters)
+counts<-matrix(0,nrow=ncl,ncol=ns)
+rownames(counts)<-clusters
+colnames(counts)<-ident
+#count per celltype
+for (s in ident) {
+  for (cl in clusters) {
+    counts[cl,s]<-sum(combined@meta.data$condition.treat.week==s & combined@meta.data$celltype==cl)
+  }
+}
+colnames(counts) <- c("7", "14", "21")
+barplot_label_colors_ctr <- c(col_ctr_v_w3,col_ctr_v_w2,col_ctr_v_w1)
+counts <- prop.table(counts,margin = 2)
+counts <- counts*100
+counts <- as.data.frame(counts)
+counts$ID <- rownames(counts)
+counts.melt <- melt(counts, id.var = 'ID')
+counts.melt <- within(counts.melt, ID <- factor(ID,
+    cell_levels, ordered = TRUE))
+labelcolors <- "black"
+barfill <- cellcolors
+
+plot <- ggplot(counts.melt, aes(y = variable, x = value, fill = ID,)) +
+    geom_bar(stat = 'identity', width = 0.5,colour="black") +
+  scale_fill_manual(values = barfill )+
+    theme(legend.position = "right", text = element_text(face = "bold"),aspect.ratio = 1,legend.title=element_blank(),
+          legend.text = element_text(size=10),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(), 
+          axis.text.y = element_blank(),
+          axis.text.x = element_text(color = labelcolors,face = "bold",size = 0),
+          axis.ticks = element_blank(),panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank())
+plot2 <- plot + coord_flip()
+pdf("ctr_cellcount_barplot.pdf", width = 5, height = 5)
+print(plot2)
+dev.off()
+
+
+#colored by batch replicate
+Idents(combined) <- "batch"
+#table data 
+t <- table(combined@meta.data$batch, combined@meta.data$celltype)
+#convert to percentage of total
+t <- prop.table(t,margin = 1)
+t <- t*100
+rownames(t) <- c("C","D","E","A","B")
+t <- t[order(rownames(t)), ]
+#document
+#write_csv(t, "celltype_counts.csv")
+# melt the data frame for plotting
+data.m <- melt(t, id.vars='celltype')
+colnames(data.m) <- c("Replicate","Cell_Type","Percent_Composition")
+#plot
+plot<- ggplot(data.m, aes(y = Replicate, x = Percent_Composition, fill = Cell_Type)) +geom_bar(stat = 'identity', width = 1,colour="black") + coord_flip()+theme(legend.text = element_text(size = 15, colour = "black", face = "bold"), legend.title = element_text(size=15, face = "bold"),axis.text = element_text(size = 15, colour = "black", angle = 20, face = "bold"), axis.title.y = element_text(size = 15, face = "bold"), axis.title.x = element_text(size =15, face = "bold"),legend.position = "bottom", legend.direction = "horizontal")+ theme(panel.background = element_blank())
+
+pdf(paste0("batch_celltype_counts.pdf"))
+print(plot)
+dev.off()
+```
+
+NEURON LOSS BARPLOT
+```{r}
+#subset to otau w1,w2,w3
+Idents(combined)<-"condition.treat.week"
+subset <- subset(combined, idents=c("otau_v_w1","otau_v_w2","otau_v_w3","ctr_v_w1","ctr_v_w2","ctr_v_w3"))
+
+#subset
+subset$batch.condition.week.treat <- paste(subset$batch_id, subset$condition,subset$week,subset$treatment,sep = "_")
+Idents(subset) <- "batch.condition.treat.week"
+#table data
+t <- table(subset@meta.data$batch.condition.week.treat, subset@meta.data$celltype)
+#convert to percentage of total
+t <- prop.table(t,margin = 2)
+t <- t*100
+
+t <- t[,c("EX_NEU")]
+
+data.m <- melt(t, id.vars=rownames)
+data.m <- cbind(rownames(data.m), data.frame(data.m, row.names=NULL))
+colnames(data.m) <- c("Condition","Percent")
+
+data.m$Week <- c("7 DIV3D", "14 DIV3D", "21 DIV3D", "7 DIV3D", "14 DIV3D", "21 DIV3D", "7 DIV3D", "14 DIV3D", "7 DIV3D", "14 DIV3D", "21 DIV3D", "21 DIV3D", "21 DIV3D", "21 DIV3D", "21 DIV3D", "21 DIV3D")
+data.m$Treatment <- c("Control", "Control", "Control","AstTau", "AstTau", "AstTau","Control", "Control","AstTau", "AstTau", "Control","AstTau", "Control","AstTau", "Control","AstTau")
+
+data.m$Treatment <- factor(data.m$Treatment, levels = c("Control","AstTau"))
+data.m$Week <- factor(data.m$Week, levels = c("7 DIV3D", "14 DIV3D", "21 DIV3D"))
+
+#plot
+plot<- ggplot(data.m, aes( y=Percent, x=Week, fill = Treatment)) +geom_bar(stat = 'identity', width = 0.75,colour="black",position=position_dodge(.8)) +theme(legend.text = element_text(size = 15, colour = "black", face = "bold"), legend.title = element_text(size=15, face = "bold"),axis.text = element_text(size = 15, colour = "black", angle = 0, face = "bold"), axis.title.y = element_text(size = 15, face = "bold"), axis.title.x = element_text(size =15, face = "bold"),legend.position = "bottom", legend.direction = "horizontal")+ theme(panel.background = element_blank())+
+  xlab("Week") + ylab("Percent EX_NEU")+
+  scale_fill_manual(values=c(col_ctr_v_w3,col_otau_v_w3)) 
+
+pdf(paste0("glu_celltype_counts.pdf"), width = 5)
+print(plot)
+dev.off()
+
+```
+
+CELLTYPE DOTPLOT
+```{r}
+diff_groups <- c("CYC","ASC","PAN-NEU","GABA","GLU","SYNAPSE")
+features <-c("PAX6","NES","SOX2","TOP2A","VIM","SLC1A3","PEA15","SPARC","GAP43","STMN2","MAPT","SNAP25","GAD1","GAD2","SLC32A1","SLC38A1","GRIA4","SLC17A6","SYP","SYT1", "DLG4")
+plot<- DotPlot(combined, features = features, cluster.idents = F, cols = c("blue", "red"), scale.by = "size")+
+  theme(text=element_text(face="bold"),axis.text.x = element_text(size=10, angle = 90), legend.position = "bottom", legend.text = element_text(size = 10), legend.title = element_text(size = 10))+
+  geom_rect(aes(xmin=0,xmax=4.5,ymin=6.5,ymax=7.5),fill=col_CYC,alpha=0.1,color="black")+
+  geom_rect(aes(xmin=4.5,xmax=8.5,ymin=6.5,ymax=7.5),fill=col_ASC,alpha=0.1,color="black")+
+  geom_rect(aes(xmin=8.5,xmax=12.5,ymin=6.5,ymax=7.5),fill=col_NEU_P,alpha=0.1,color="black")+
+  geom_rect(aes(xmin=12.5,xmax=15.5,ymin=6.5,ymax=7.5),fill=col_IN_NEU,alpha=0.1,color="black")+
+  geom_rect(aes(xmin=15.5,xmax=18.5,ymin=6.5,ymax=7.5),fill=col_EX_NEU,alpha=0.1,color="black")+
+  geom_rect(aes(xmin=18.5,xmax=21.5,ymin=6.5,ymax=7.5),fill=col_NEU_X,alpha=0.1,color="black")+
+  annotate(geom = "text", x = c(2.5,6.5,10.5,14,17,20), y =7, label = diff_groups, size = 4)+
+  labs(y="Celltype",x="Genes")
+pdf("diff_dotplot.pdf")
+print(plot)
+dev.off()
+```
+
+CELLTYPE STACKED VLNPLOT
+```{r}
+#NEW FUNCTION
+
+## remove the x-axis text and tick
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj, 
+                          feature, 
+                          pt.size = 0.0,
+                          plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                          ...) {
+  p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )  + 
+    xlab("") + ylab(feature) + ggtitle("") + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 0),plot.caption = element_text(size = 0),
+          axis.text.x = element_text(size=0), axis.title.x = element_text(size=0),
+          axis.ticks.length.x = unit(0, "pt"),
+          axis.ticks.x = element_blank(),
+          axis.title.y = element_text(size = rel(1), angle = 0, face = "bold"), 
+          axis.text.y = element_text(size = rel(1), face = "bold"),
+          plot.margin = plot.margin ) 
+  return(p)
+}
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0.0, 
+                          plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                          ...) {
+  
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+  
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(size = 15, angle = 35, face= "bold"), axis.ticks.x = element_line())
+  
+  # change the y-axis tick to only max value 
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x +
+                            scale_y_continuous(breaks = c(y)) +
+                            expand_limits(y = y))
+
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1) 
+        
+  return(p)
+}
+
+
+#PLOT
+
+features <-c("NES","TOP2A","VIM","SLC1A3","PEA15","GAP43","STMN2","NEFM","SLC38A1","SYP")
+
+
+combined <- SetIdent(combined, value ="celltype")
+
+plot <- StackedVlnPlot(obj = combined, features = features)
+
+
+#pdf("cell_stckvln.pdf" )
+pdf("cell_stckvln_celltype.pdf", width= 5, height =10 )
+print(plot)
+dev.off()
+
+```
+
+DIFFERENTIAL GENE EXPRESSION (DEG)
+```{r}
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau","asyn")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+for(ct in celltypes){
+  for (cond in conditions){
+  for(wk in weeks){
+   for(trt in treatment){
+      tryCatch({
+Idents(combined) <- "celltype.condition.week.treat"
+response <- FindMarkers(combined, ident.1 = paste0(ct,"_",cond,"_",wk,"_",trt), ident.2 = paste0(ct,"_ctr_",wk,"_",trt), verbose = FALSE, pseudocount.use = 0.0001, assay = "RNA", logfc.threshold = 0.25)
+response$p_val_adj_fdr=p.adjust(response$p_val,method="fdr")
+#csv
+response$name=rownames(response)
+response=response[order(response$avg_log2FC),]
+write.csv(response, paste0(ct,"_",cond,"_",wk,"_",trt,"_DEG.csv"))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+
+```
+
+SIG DEG CSV
+```{r}
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau","asyn")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+#UP
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+     tryCatch({
+x <- read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_DEG.csv"))
+x <- x[with(x, order(p_val)), ]
+x <- x[x$p_val_adj_fdr<0.05,]
+x <- x[x$avg_log2FC > 0.25,]
+x <- subset(x, select = name)
+write_csv(x,paste0(ct,"_",cond,"_",wk,"_",trt,"_SIG_UP_DEG.csv"))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+#DOWN
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+     tryCatch({
+x <- read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_DEG.csv"))
+x <- x[with(x, order(p_val)), ]
+x <- x[x$p_val_adj_fdr<0.05,]
+x <- x[x$avg_log2FC < -0.25,]
+x <- subset(x, select = name)
+write_csv(x,paste0(ct,"_",cond,"_",wk,"_",trt,"_SIG_DN_DEG.csv"))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+```
+
+DEG TABLE
+```{r}
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau","asyn")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+#UP
+#set up data frame 
+df_UP=data.frame(row.names="genes")
+num=numeric()
+#set up loops 
+for(ct in celltypes){
+  for(cond in conditions){
+    for(wk in weeks){
+      for(treat in treatment){
+        tryCatch({
+#read file
+x_UP <- read.csv(paste0(ct,"_",cond,"_",wk,"_",treat,"_SIG_UP_DEG.csv"))
+#count genes/rows
+num <- nrow(x_UP)
+#bind to data frame 
+df_UP=cbind(df_UP,num)
+#set colnames 
+colnames(df_UP)[ncol(df_UP)]=paste0(ct,"_",cond,"_",wk,"_",treat)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+#DOWN
+#set up data frame 
+df_DN=data.frame(row.names="genes")
+num=numeric()
+#set up loops 
+for(ct in celltypes){
+  for(cond in conditions){
+    for(wk in weeks){
+      for(treat in treatment){
+        tryCatch({
+#read file
+x_DN <- read.csv(paste0(ct,"_",cond,"_",wk,"_",treat,"_SIG_DN_DEG.csv"))
+#count genes/rows
+num <- nrow(x_DN)
+#bind to data frame 
+df_DN=cbind(df_DN,num)
+#set colnames 
+colnames(df_DN)[ncol(df_DN)]=paste0(ct,"_",cond,"_",wk,"_",treat)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+#merge dataframes, add up and down genes 
+# add rownames as a column in each data.frame and bind rows
+df <- bind_rows(df_UP %>% add_rownames(), 
+          df_DN%>% add_rownames()) %>% 
+    # evaluate following calls for each value in the rowname column
+    group_by(rowname) %>% 
+    # add all non-grouping variables
+   summarise_all(sum)
+write.csv(df, "DEG_count.csv")
+```
+
+GENESETS
+```{r}
+#see SourceTable1.Genesets for more information on sources 
+
+#GO Cytosolic Ribosomal
+ribo <-c("APOD","DDX3X","DHX29","EIF2A","EIF2AK2","EIF2AK3","EIF2AK4","EIF2D","FAU","GM3550","GM6096","GM6133","GM6525","GM14214","GM15013","GM20509","GM45713","GM49804","HBA-A1","HBA-A2","ISG15","LARP4","MCTS1","MRPL1","MRPS11","NUFIP1","PPARGC1A","RACK1","REPIN1","RPL3","RPL3L","RPL4","RPL5","RPL6","RPL7","RPL7A","RPL7L1","RPL8","RPL9","RPL10","RPL10A","RPL10L","RPL11","RPL12","RPL13","RPL13A","RPL14","RPL15","RPL17","RPL18","RPL18A","RPL19","RPL21","RPL22","RPL23","RPL23A","RPL24","RPL26","RPL27","RPL27A","RPL28","RPL29","RPL30","RPL31","RPL32","RPL32L","RPL34","RPL35","RPL35A","RPL36","RPL36A","RPL37","RPL37A","RPL38","RPL39","RPL39L","RPLP0","RPLP1","RPLP2","RPS2","RPS3","RPS3A1","RPS4L","RPS4X","RPS5","RPS6","RPS7","RPS8","RPS9","RPS10","RPS11","RPS12","RPS13","RPS14","RPS15","RPS15A","RPS16","RPS17","RPS18","RPS19","RPS20","RPS21","RPS23","RPS24","RPS25","RPS26","RPS27","RPS27A","RPS27L","RPS28","RPS29","RPSA","RSL24D1","UBA52","ZCCHC17")
+ribo = ribo [ribo %in% rownames(combined@assays$RNA@data)]
+
+#AD Associated Astrocyte Signature 
+DAA_FIG2<- c("GFAP","APOE","CLU","CST3","MT1","CPE","ID3","CD9","CD81","MT2","FXYD1","CKB","VIM","PRDX6","CSMD1","DBI","CTSB","FTH1","HSD17B4","SLC1A3","CST3","NCAM2","KCNIP4","LUZP2","PLCE1","GRM5","ENOX1","VIM","CADM2")
+DAA_FIG2 = DAA_FIG2[DAA_FIG2 %in% rownames(combined@assays$RNA@data)]
+
+#A1 Toxic Astrocyte Signature
+ZAMANIAN_A1_AST <- c("SULF2","CRISPLD2","DCN","AMIGO2","FBL5","NFASC","SORBS1","SRGN","TLR2","SAA3","ZC3HAV1","TRIM30A","TGTP1","IRGM1","TNFAIP2","TAPBP","TAPBPL","B2M","H2-D1","H2-K1","H2-Q6","H2-T10","H2-T23","PMSB8","PSMB9","KCTD1","SLC22A4","SLC1A5","IL1R1","IL13RA","IFI44","IGTP","GBP2","PARP14","XAF1","C1RB","C1RA","C4B","C1S","FKBP5","HSP1","MAP3K6","OLFM1","SEMA4C","GPX3","GSR","ACSL5","LY6E","UGT1A1","ENDOU","PLIN4","TSPO","ANGPT1","TGM2","SLC43A3","FBLN5","UGT1A","PSMB8","GBP10","GM3579")
+ZAMANIAN_A1_AST = ZAMANIAN_A1_AST[ZAMANIAN_A1_AST %in% rownames(combined@assays$RNA@data)]
+
+#A2 Protective Astroyte Signature 
+ZAMANIAN_A2_AST <- c("CD24A","JUB","COL6A1","IGFBP3","COL6A2","COL12A1","LGALS1","PVR","THBS1","TGFBI","VCAN","DPYSL3","ECM1","ADAM12","ADAMTS4","ADAMTS5","LGALS3","NAV2","FGL2","NETO2","OLFML3","AKR1B8","BCAT1","ODC1","ESD","PDE3B","ASNS","CYP1B1","B3GNT5","GCNT2","CTPS","UCK2","CDBPD","KLF5","KLF6","TGIF1","AHR","FOSL1","HMGA","FOSL2","SBNO2","S100A6","ZWINT","CDT1","CCND1","CDK6","GADD45A","HMGA2","EMP1","BDKRB2","GADD45B","SPHK1","SOCS3","CAMK2D","ODZ2","SHISA6","NUPR1","THBD","TLR4","PLP2","CLCF1","CCL2","IL6","LIF","ARPC1B","ACTN1","FSCN1","FLNC","FLNA","MSN","STEAP1","SLC5A3","AKAP12","LMNA","NES","TUBA1A","TUBB6","AGPAT9","CAV1","LASS6","PLA2G4A","CH25H","PTGS2","SERPINE1","ANXA1","ANXA2","ANXA7","ANXA3","S100A11","GPX1","HMOX1","SRXN1","TXNRD1","GCH1","MCL1","LITAF","EDA2R","SULF1","IFI203","PAPPA","PRSS23","LONRF1","VGF","CACNG5","SYT4","NHP2","NOP58","EIF1A","PCBP3","IL13RA1","IL6RA","MET","TNFRSF12A","BDNF","CTGF","GDF15","RNF125","RNF19B","OCIAD2","MRPS6","MTHFD2","EII2","FAM129B","GRB10","TMEM74","KLHDC8A","LRRC59","MEST","TM4SF1","LRRFIP1","STX11","SPATA13","SLC44A3","SLC7A1","AHNAK","AHNAK2","H19","BTG3","CHAC1","HMGA1")
+ZAMANIAN_A2_AST = ZAMANIAN_A2_AST[ZAMANIAN_A2_AST %in% rownames(combined@assays$RNA@data)]
+
+#HALLMARK TNFA SIGNALING VIA NFKB
+tnf<- c("ABCA1","ACKR3","AREG","ATF3","ATP2B1","B4GALT1","B4GALT5","BCL2A1","BCL3","BCL6","BHLHE40","BIRC2","BIRC3","BMP2","BTG1","BTG2","BTG3","CCL2","CCL20","CCL4","CCL5","CCN1","CCND1","CCNL1","CCRL2","CD44","CD69","CD80","CD83","CDKN1A","CEBPB","CEBPD","CFLAR","CLCF1","CSF1","CSF2","CXCL1","CXCL10","CXCL11","CXCL2","CXCL3","CXCL6","DDX58","DENND5A","DNAJB4","DRAM1","DUSP1","DUSP2","DUSP4","DUSP5","EDN1","EFNA1","EGR1","EGR2","EGR3","EHD1","EIF1","ETS2","F2RL1","F3","FJX1","FOS","FOSB","FOSL1","FOSL2","FUT4","G0S2","GADD45A","GADD45B","GCH1","GEM","GFPT2","GPR183","HBEGF","HES1","ICAM1","ICOSLG","ID2","IER2","IER3","IER5","IFIH1","IFIT2","IFNGR2","IL12B","IL15RA","IL18","IL1A","IL1B","IL23A","IL6","IL6ST","IL7R","INHBA","IRF1","IRS2","JAG1","JUN","JUNB","KDM6B","KLF10","KLF2","KLF4","KLF6","KLF9","KYNU","LAMB3","LDLR","LIF","LITAF","MAFF","MAP2K3","MAP3K8","MARCKS","MCL1","MSC","MXD1","MYC","NAMPT","NFAT5","NFE2L2","NFIL3","NFKB1","NFKB2","NFKBIA","NFKBIE","NINJ1","NR4A1","NR4A2","NR4A3","OLR1","PANX1","PDE4B","PDLIM5","PER1","PFKFB3","PHLDA1","PHLDA2","PLAU","PLAUR","PLEK","PLK2","PLPP3","PMEPA1","PNRC1","PPP1R15A","PTGER4","PTGS2","PTPRE","PTX3","RCAN1","REL","RELA","RELB","RHOB","RIPK2","RNF19B","SAT1","SDC4","SERPINB2","SERPINB8","SERPINE1","SGK1","SIK1","SLC16A6","SLC2A3","SLC2A6","SMAD3","SNN","SOCS3","SOD2","SPHK1","SPSB1","SQSTM1","STAT5A","TANK","TAP1","TGIF1","TIPARP","TLR2","TNC","TNF","TNFAIP2","TNFAIP3","TNFAIP6","TNFAIP8","TNFRSF9","TNFSF9","TNIP1","TNIP2","TRAF1","TRIB1","TRIP10","TSC22D1","TUBB2A","VEGFA","YRDC","ZBTB10","ZC3H12A","ZFP36")
+tnf= tnf[tnf%in% rownames(combined@assays$RNA@data)]
+
+#Reactome_HSF1 Pathway 
+HSF1 <- c("COL4A6","CRYBA4","DEDD2","DNAJB1","DNAJB6","EEF1A1","FKBP4","GML","HDAC6","HSBP1","HSF1","HSP90AA1","HSP90AB1","HSPA1A","HSPA1B","HSPA1L","HSPA6","HSPB1","HSPB2","HSPH1","MRPL18","PTGES3","RLN1","RPA1","RPA2","RPA3","SERPINH1","TNFRSF21","UBB","VCP","YWHAE")
+HSF1 = HSF1[HSF1 %in% rownames(combined@assays$RNA@data)]
+
+#AD Neuron Upregulated Signature (Grubman)
+GRUBMAN <- c("QDPR","HSP90AA1","NDRG2","MT3","PSAP","HIF3A","GPRC5B","HSP90AB1","CNTN2","CERCAM","BIN1","BCYRN1","CLK1","DNAJB1","NDRG1")
+GRUBMAN = GRUBMAN[GRUBMAN %in% rownames(combined@assays$RNA@data)]
+
+#AD GWAS
+
+GWAS2 <-c("APOE","SORT1","CR1","ADAM17","PRKD3","NCK2","BIN1","WDR12","INPP5D","MME","IDUA","CLNK","RHOH","ANKH","COX7C","TNIP1","RASGEF1C","UNC5CL","TREML2","CD2AP","HS3ST5","UMAD1","ICA1","TMEM106B","JAZF1","EPDR1","SEC61G","SPDYE3","EPHA1","CTSB","PTK2B","CLU","SHARPIN","ABCA1","USP6NL","ANK3","TSPAN14","PLEKHA1","SPI1","MS4A4A","EED","SORL1","TPCN1","FERMT2","SLC24A4","SPPL2A","MINDY2","APH1B","SNX1","CTSH","DOC2A","BCKDK","IL34","MAF","PLCG2","FOXF1","WDR81","SCIMP","MYO15A","GRN","WNT3","ABI3","TSPOAP1","ACE","ABCA7","KLF16","SIGLEC11","LILRB2","RBCK1","CASS4","SLC2A4RG","APP","ADAMTS1")
+
+```
+
+GWAS HEATMAP
+```{r}
+genes <- GWAS2
+path <- "AD GWAS GENE EXPRESSION"
+#toggle
+#cells <- c("ASC")
+#cells <- c("IN_NEU")
+cells <- c("EX_NEU")
+conds <- c("ctr_v_w3","otau_v_w3")
+#conds <- c("EX_NEU_ctr_w3_v","EX_NEU_otau_w3_v","IN_NEU_ctr_w3_v","IN_NEU_otau_w3_v","ASC_ctr_w3_v","ASC_otau_w3_v")
+#colnames <- c("OUD-","OUD-")
+colwidth <- 5
+heights <- 10
+#fig <- "5"
+
+#START
+Nuclei <- combined
+
+Nuclei=SetIdent(Nuclei,value="condition.treat.week")
+cond=conds
+temp=subset(Nuclei,idents=cond)
+
+temp=SetIdent(temp,value="celltype")
+celltype=cells
+temp=subset(temp,idents=celltype)
+
+genes = genes[genes %in% rownames(temp@assays$RNA@data)]
+
+temp=SetIdent(temp,value="condition.treat.week")
+temp=FindVariableFeatures(temp)
+temp=ScaleData(temp,vars.to.regress="nCount_RNA",features=unique(c(temp@assays$RNA@var.features,genes)))
+
+heatcolor=brewer.pal(11,"RdYlBu")
+
+what=AverageExpression(temp,features=genes,verbose=F,slot="scale.data")$RNA
+min=quantile(unlist(what),0.1)
+mid=quantile(unlist(what),0.5)
+max=quantile(unlist(what),0.9)
+
+p <- Heatmap(what,
+             width = unit(colwidth, "cm"),
+             name="Gene Expression",
+             col=colorRamp2(c(min, 0, max), c("blue", "white", "red")),
+             clustering_method_columns = "ward.D2",
+             cluster_rows=FALSE,
+             cluster_columns=FALSE,
+             column_split=do.call("rbind",strsplit(colnames(what),split="_"))[,1],
+             show_column_names=T,
+             show_row_names=F,
+             rect_gp = gpar(col = "black", lwd = 2), 
+             show_column_dend = FALSE, 
+             show_row_dend = FALSE, 
+             column_labels = c("-","+"), 
+             column_names_rot = 0, 
+             column_names_centered = T,
+             column_title = celltype, 
+             column_title_gp = gpar(fontface="bold"), 
+             column_names_gp = gpar(fontface="bold"), 
+             heatmap_legend_param = list(direction = "horizontal"),
+             row_names_gp = gpar(fontface="bold"))
+
+
+p<- ComplexHeatmap::draw(p, heatmap_legend_side="bottom")
+
+pdf(paste0("./gwas/",celltype,"_gwas_heatmap.pdf"),width = 8, height = heights)
+p
+dev.off()
+
+
+```
+
+SUBSET ANALYSIS
+```{r}
+#subset to main conditions
+Idents(combined)<-"condition.treat.week"
+subset <- subset(combined, idents=c("ctr_v_w3", "otau_v_w3"))
+Idents(subset)<-"condition.treat.week"
+
+CELLTYPES <- c("ASC")
+
+#CELLTYPES <- c("IN_NEU","EX_NEU")
+
+for (CTS in CELLTYPES){
+   tryCatch({
+
+Idents(subset)<-"celltype"
+subset_ct <- subset(subset, idents=CTS)
+subset_ct <- FindVariableFeatures(subset_ct, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(subset_ct)
+subset_ct <- ScaleData(subset_ct, features = all.genes)
+subset_ct <- RunPCA(subset_ct, verbose = FALSE)
+subset_ct <- RunUMAP(subset_ct, reduction = "pca", dims = 1:15)
+subset_ct <- FindNeighbors(subset_ct, dims = 1:15, verbose = FALSE)
+subset_ct <- FindClusters(subset_ct, verbose = FALSE)
+
+#Save seurat object 
+save(subset_ct,file="subset_ASC.RData")
+
+ }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+#relevel
+#Condition
+Idents(subset_ct) <- "condition.treat.week"
+# Define an order of cluster identities
+condition_levels <-  c("ctr_v_w3", "otau_v_w3")
+# Relevel object@ident
+subset_ct@meta.data$condition.treat.week <- factor(x = subset_ct@meta.data$condition.treat.week, levels = condition_levels)
+
+#colors
+cond_color_sub <- c(col_ctr_v_w3,col_otau_v_w3)
+cond_label  <- c("Control", "AstTau")
+
+#umaps
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_UMAP.pdf"))
+DimPlot(subset_ct, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE, label.size = 8, raster = F)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15) )
+dev.off()
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_condition_UMAP.pdf"))
+DimPlot(subset_ct, reduction = "umap", group.by = "condition", shuffle = TRUE, raster=F)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15))+scale_color_manual(labels= cond_label,values= cond_color_sub)
+dev.off()
+
+#combined clusters 
+
+#celltype assignment
+Idents(subset_ct)<- subset_ct$seurat_clusters
+subset_ct<- RenameIdents(subset_ct, `0` = "A", `1` = "B", `2` = "C", `3` = "B", `4` = "D", `5` = "C", `6` = "E", `7` = "F", `8` ="G", `9` = "C", `10` = "E", `11` ="G", `12` = "F")
+subset_ct$cluster2 <- Idents(subset_ct)
+
+#new metadata columns
+subset_ct$cluster_condition <- paste(subset_ct$seurat_clusters, subset_ct$condition, sep = "_")
+subset_ct$cluster2_condition <- paste(subset_ct$cluster2, subset_ct$condition, sep = "_")
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_UMAP_2.pdf"))
+DimPlot(subset_ct, reduction = "umap", group.by = "cluster2", label = TRUE, repel = TRUE, label.size = 8, raster = F)+theme(text = element_text(face = "bold"),plot.title = element_text(size = 0), axis.text = element_text(size = 15) )
+dev.off()
+
+
+#cluster count barplot
+
+#colored by condition
+Idents(subset_ct) <- "condition"
+#table data 
+t <- table(subset_ct@meta.data$condition, subset_ct@meta.data$cluster2)
+rownames(t) <- c("Control","AstTau")
+#convert to percentage of total
+t <- prop.table(t,margin = 1)
+t <- t*100
+#document
+write_csv(as.data.frame(t), paste0("./subset/",CTS,"/",CTS,"_cluster_counts_2.csv"))
+# melt the data frame for plotting
+data.m <- melt(t, id.vars='cluster2')
+#plot
+plot<- ggplot(data.m, aes(y = Var1, x = value, fill = as.character(Var2))) +geom_bar(stat = 'identity', width = 1,colour="black") +theme(legend.text = element_text(size = 10, colour = "black"), axis.text.y = element_text(size = 10, colour = "black", angle = 20), axis.title.y = element_text(size = 0), axis.title.x = element_text(size = 0),axis.text.x = element_text(face="bold", size = 10),legend.position = "bottom", legend.direction = "horizontal")+ theme(panel.background = element_blank())+ 
+  labs(fill='Cluster')+theme(aspect.ratio = .2)+ guides(fill = guide_legend(nrow = 1))
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_barplot_2.pdf"))
+print(plot)
+dev.off()
+
+#cluster markers
+Idents(subset_ct)<-"cluster2"
+markers <- FindAllMarkers(subset_ct, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 2, order_by = avg_log2FC)
+
+write_csv(markers, paste0("./subset/",CTS,"/",CTS,"_cluster_markers_sub_2.csv"))
+
+markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_heatmap_2.pdf"))
+print(DoHeatmap(subset_ct, features = top10$gene ) + NoLegend()+theme(axis.text.y = element_text(size=5)))+ scale_fill_gradientn(colors = c("blue", "white", "red"))
+dev.off()
+
+```
+
+DEG HEATMAP
+```{r}
+#make top 25 gene list 
+
+##TOGGLE to output +/- PU 
+##V
+treatment <- c("v")
+weeks <- c("w1","w2","w3")
+colnames <- c("","","")
+label <- "v"
+rowwidth<- 25
+docheight <-11
+##PU
+# treatment <- c("v","pu")
+# weeks <- c("w1","w3")
+# colnames <- c("","","")
+# label<-"pu"
+# rowwidth<- 25
+# docheight <-11
+
+##TOGGLE to output individual plot for each cell type 
+celltypes <- c("EX_NEU")
+#celltypes <- c("IN_NEU")
+#celltypes <- c("ASC")
+
+conditions <- c("otau")
+direction <- c("UP","DN")
+
+gs=character()
+
+for(cond in conditions){
+for(dir in direction){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+        tryCatch({
+#selecting top 25 genes 
+data <- read.csv2(paste0(ct,"_",cond,"_",wk,"_",trt,"_","SIG_",dir,"_DEG.csv"))
+data2 <- head(data, 25)
+data3<- data2$name
+gs=c(gs,data3)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+       }}}}}
+genes=unique(gs)
+
+#sest up complexheatmap dataframe 
+gs=genes
+df=data.frame(row.names=gs)
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+        tryCatch({
+res=rep(0,length(gs))
+ressig=rep(0,length(gs))
+data <- read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_DEG.csv"))
+rownames(data)=data$name
+res[gs %in% data$name]=data[gs[gs %in% data$name],"avg_log2FC"]
+df=cbind(df,res)
+colnames(df)[ncol(df)]=paste0(ct,"_",cond,"_",wk,"_",trt)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+   }}}}
+
+#set heatmap formatting 
+ht_opt(legend_border = "black",heatmap_border = TRUE)
+colwidth<- 2
+
+#color code row names based on ontology pathway 
+#1= HSP 
+celltype1 <-HSF1 
+selectcolor1 <- "red"
+#2= TNF
+celltype2 <-tnf
+selectcolor2 <- "purple"
+#3= RIBO 
+celltype3 <-ribo
+selectcolor3 <- "green"
+keyvals <- ifelse(rownames(df) %in% celltype1, selectcolor1,
+      ifelse(rownames(df) %in% celltype2, selectcolor2,
+             ifelse(rownames(df) %in% celltype3, selectcolor3,
+       "black")))
+#make heatmap
+ht<- Heatmap(df,width = unit(colwidth, "cm"), height = unit(rowwidth, "cm"), row_names_gp = gpar(fontsize = 6, face="bold",col = keyvals),column_names_gp = gpar(fontsize=8, face="bold"), cluster_columns = F, cluster_rows = F,column_labels = colnames, column_names_rot=0, column_names_centered = TRUE, column_names_side = "top",name = "log2FC")
+pdf(paste0(ct,"_",label,"_", dir,"_DEG_heatmap.pdf"), width = 2, height = docheight)
+ht
+dev.off()
+```
+
+GPRO HEATMAP CSV
+```{r}
+#create custom GMT ID code
+# upload_GMT_file(".gmt")
+# "gp__zSEF_sD9Q_d1M"- all mSIGdB HALLMARK,C2,and C5 pathways 
+#create custom domain_scope, the full list of genes in your assay as the background 
+total.genes <- rownames(combined@assays$RNA@data)
+write.csv(total.genes, "total_genes.csv")
+#loading in data for loop, see the 'for' and read.csv arguments
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau","asyn")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+direction=c("SIG_DN_DEG","SIG_UP_DEG")
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+      for(dir in direction){
+     tryCatch({
+x <- read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_",dir,".csv"))
+x <- as.character(x$name)
+#GPRO
+gostres <- gost(query = x, 
+                organism = "gp__zSEF_sD9Q_d1M", ordered_query = TRUE, 
+                multi_query = FALSE, significant = FALSE, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = FALSE, 
+                user_threshold = 0.05, correction_method = "fdr", 
+                domain_scope = "custom", custom_bg = total.genes, 
+                numeric_ns = "", sources = "GO", as_short_link = FALSE)
+gostres2 <- gostres$result 
+gostres3 <- gostres2[1:13]
+#write.csv 
+write_csv(gostres3, paste0(ct,"_",cond,"_",wk,"_",trt,"_",dir,"_gpro.csv"))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}}
+```
+
+GPRO GEM TXT 
+```{r}
+#create custom GMT ID code 
+#upload_GMT_file(".gmt")
+# "gp__zSEF_sD9Q_d1M"- all mSIGdB HALLMARK,C2,and C5 pathways
+#create custom domain_scope, the full list of genes in your assay as the background 
+total.genes <- rownames(combined@assays$RNA@data)
+write.csv(total.genes, "total_genes.csv")
+#loading in data for loop, see the 'for' and read.csv arguments
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau","asyn")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+direction=c("SIG_DN_DEG","SIG_UP_DEG")
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+      for(dir in direction){
+     tryCatch({
+x <- read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_",dir,".csv"))
+x <- as.character(x$name)
+#GPRO
+gostres <- gost(query = x, 
+                organism = "gp__zSEF_sD9Q_d1M", ordered_query = TRUE, 
+                multi_query = FALSE, significant = TRUE, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = TRUE, 
+                user_threshold = 0.05, correction_method = "fdr", 
+                domain_scope = "custom", custom_bg = total.genes, 
+                numeric_ns = "", sources = "GO", as_short_link = FALSE)
+gostres$result=gostres$result[gostres$result$intersection_size>1,]
+gem <- gostres$result[,c("term_id", "term_name", "p_value", "intersection")]
+colnames(gem) <- c("GO.ID", "Description", "p.Val", "Genes")
+gem$FDR <- gem$p.Val
+gem$Phenotype = "+1"
+gem <- gem[,c("GO.ID", "Description", "p.Val", "FDR", "Phenotype", "Genes")]
+toMatch <- c("^GO_", "^REACTOME_", "^KEGG_","^HALLMARK_")
+gem=gem[grep(paste0(toMatch,collapse="|"),gem$GO.ID),]
+write.table(gem, file = paste0(ct,"_",cond,"_",wk,"_",trt,"_",dir,"_gpro_gem.txt"), sep = "\t", quote = F, row.names = F)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}}
+```
+
+GPRO GS W/OTAU ONLY
+```{r}
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau")
+weeks <- c("w1","w2","w3")
+treatment <- c("v")
+gs=character()
+toMatch <- c("^GO_", "^REACTOME_", "^KEGG_","^HALLMARK_")
+#UP
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+   tryCatch({
+t=read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_","SIG_UP_DEG_gpro.csv"))
+t=t[grep(paste0(toMatch,collapse="|"),t$term_id),]
+t$term_id=as.character(t$term_id)
+t=t[t$p_value<0.05,]
+t=t[t$intersection_size>1,]
+t=t[t$term_size<500,]
+t <-t[order(t$p_value),]
+gs=c(gs,head(t$term_id,25))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+gs=unique(gs)
+#save rds
+saveRDS(gs, file = paste0("UP_GPRO_GS.rds"))
+write_csv(as.data.frame(gs),paste0("UP_GPRO_GS.csv"))
+#DN
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+    tryCatch({
+t=read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_","SIG_DN_DEG_gpro.csv"))
+t=t[grep(paste0(toMatch,collapse="|"),t$term_id),]
+t$term_id=as.character(t$term_id)
+t=t[t$p_value<0.05,]
+t=t[t$intersection_size>1,]
+t=t[t$term_size<500,]
+t <-t[order(t$p_value),]
+gs=c(gs,head(t$term_id,25))
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+gs=unique(gs)
+#save rds
+saveRDS(gs, file = paste0("DN_GPRO_GS.rds"))
+write_csv(as.data.frame(gs),paste0("DN_GPRO_GS.csv"))
+```
+
+GPRO HEATMAP W/ OTAU V ONLY
+```{r}
+#colors
+heatcolor1=brewer.pal(11,"RdYlBu")[1]
+heatcolor2=brewer.pal(11,"RdYlBu")[5]
+cellcol<- c(col_EX_NEU, col_IN_NEU,col_ASC)
+#samples
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau")
+weeks <- c("w1","w2","w3")
+treatment <- c("v")
+#UP
+gs=readRDS(paste0("UP_GPRO_GS.rds"))
+df=data.frame(row.names=gs)
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+     tryCatch({
+res=rep(0,length(gs))
+ressig=rep(0,length(gs))
+t=read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_","SIG_UP_DEG_gpro.csv"))
+t <- na.omit(t)
+t$term_id=as.character(t$term_id)
+rownames(t)=t$term_id
+res[gs %in% t$term_id]=t[gs[gs %in% t$term_id],"p_value"]
+df=cbind(df,res)
+colnames(df)[ncol(df)]=paste0(ct,"_",cond,"_",wk,"_",trt)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+
+}}}}
+log.df <- -log10(df)
+log.df[log.df == Inf] <- 0
+#shorten rownames
+row.names(log.df)<-gsub("_", " ", row.names(log.df), fixed=TRUE)
+row.names(log.df) <- strtrim(row.names(log.df), width=50)
+#set split
+split = rep(1:length(celltypes), each = 3)
+#set colnames
+colnames <- rep(c("7","14","21"), times = length(celltypes))
+#set annotations
+ha = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = cellcol), labels = c( celltypes <- c("EX_NEU","IN_NEU","ASC")), labels_gp = gpar(fontsize=15)))
+#make heatmap
+ht<- Heatmap(log.df,
+        name = "-log10(p-value)",
+        column_names_rot=0,
+        column_names_centered = TRUE,
+        row_names_gp = gpar(fontsize = 4),
+        column_labels = colnames,
+        column_names_side = "top",
+        column_names_gp = gpar(fontsize=12),
+        cluster_columns=F,
+        cluster_rows=F,
+        show_row_dend = F,
+        col=colorRamp2(c(0,1.30102,1.30103,max(log.df)),c("white","white",heatcolor2, heatcolor1)),
+        column_split = split,
+        top_annotation = ha, 
+        column_title = NULL,
+        heatmap_legend_param = list(direction = "horizontal"),
+       row_names_max_width = max_text_width( rownames(log.df), gp = gpar(fontsize = 4, face='bold')))
+ht<- ComplexHeatmap::draw(ht, heatmap_legend_side="bottom")
+pdf(paste0("SIG_UP_DEG_GPRO_heatmap.pdf"))
+ht
+dev.off()
+```
+
+GPRO HEATMAP W/ OTAU V+PU 
+```{r}
+#colors
+heatcolor1=brewer.pal(11,"RdYlBu")[1]
+heatcolor2=brewer.pal(11,"RdYlBu")[5]
+cellcol<- c(col_EX_NEU, col_IN_NEU,col_ASC)
+#samples
+celltypes <- c("EX_NEU","IN_NEU","ASC")
+conditions <- c("otau")
+weeks <- c("w1","w2","w3")
+treatment <- c("v","pu")
+#UP
+gs=readRDS(paste0("UP_GPRO_GS.rds"))
+df=data.frame(row.names=gs)
+for(cond in conditions){
+for(ct in celltypes){
+  for(wk in weeks){
+   for(trt in treatment){
+   tryCatch({
+res=rep(0,length(gs))
+ressig=rep(0,length(gs))
+t=read.csv(paste0(ct,"_",cond,"_",wk,"_",trt,"_","SIG_UP_DEG_gpro.csv"))
+t <- na.omit(t)
+t$term_id=as.character(t$term_id)
+rownames(t)=t$term_id
+res[gs %in% t$term_id]=t[gs[gs %in% t$term_id],"p_value"]
+df=cbind(df,res)
+colnames(df)[ncol(df)]=paste0(ct,"_",cond,"_",wk,"_",trt)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}}}
+log.df <- -log10(df)
+log.df[log.df == Inf] <- 0
+#shorten rownames
+row.names(log.df)<-gsub("_", " ", row.names(log.df), fixed=TRUE)
+row.names(log.df) <- strtrim(row.names(log.df), width=50)
+#set split
+split = rep(1:length(celltypes), each = 5)
+#set colnames
+colnames <- rep(c("7","14","14","21","21"), times = length(celltypes))
+#set annotations
+ha = HeatmapAnnotation(foo = anno_block(gp = gpar(fill = cellcol), labels = celltypes, labels_gp = gpar(fontsize=15)))
+#heatmap
+ht<- Heatmap(log.df,
+        name = "-log10(p-value)",
+        column_names_rot=0,
+        column_names_centered = TRUE,
+        row_names_gp = gpar(fontsize = 4),
+        column_labels = colnames,
+        column_names_side = "top",
+        column_names_gp = gpar(fontsize=12),
+        cluster_columns=F,
+        cluster_rows=F,
+        show_row_dend = F,
+        col=colorRamp2(c(0,1.30102,1.30103,max(log.df)),c("white","white",heatcolor2, heatcolor1)),
+        column_split = split,
+        top_annotation = ha, 
+        column_title = NULL,
+        heatmap_legend_param = list(direction = "horizontal"),
+       row_names_max_width = max_text_width( rownames(log.df), gp = gpar(fontsize = 4, face='bold')))
+ht<- ComplexHeatmap::draw(ht, heatmap_legend_side="bottom")
+pdf(paste0("PU_SIG_UP_DEG_GPRO_heatmap.pdf"))
+ht
+dev.off()
+```
+
+LITERATURE HEATMAP COMPARISON
+```{r}
+#gather genesets from literature to compare 
+##AstTAU, common upregulated genes across IN_NEU, EX_NEU, ASC, 11 genes, p<0.05, log2FC < 0.25
+csv_1 <- read.csv(paste0("IN_NEU_otau_w3_v_SIG_UP_DEG.csv"))
+csv_2 <- read.csv(paste0("EX_NEU_otau_w3_v_SIG_UP_DEG.csv"))
+csv_3 <- read.csv(paste0("ASC_otau_w3_v_SIG_UP_DEG.csv"))
+csv <- merge(csv_1,csv_2, by = 1, all=TRUE)
+csv2 <- merge(csv,csv_3, by = 1, all=FALSE)
+write_csv(csv2, paste0("asteroid_gprocomp.csv"))
+##AstaSYN, common upregulated genes across IN_NEU, EX_NEU, ASC, 491 genes, p<0.05, log2FC < 0.25
+csv_1 <- read.csv(paste0("IN_NEU_asyn_w3_v_SIG_UP_DEG.csv"))
+csv_2 <- read.csv(paste0("EX_NEU_asyn_w3_v_SIG_UP_DEG.csv"))
+csv_3 <- read.csv(paste0("ASC_asyn_w3_v_SIG_UP_DEG.csv"))
+csv <- merge(csv_1,csv_2, by = 1, all=TRUE)
+csv2 <- merge(csv,csv_3, by = 1, all=FALSE)
+write_csv(csv2, paste0("x_asteroid_asyn_gprocomp.csv"))
+##MATHYS common upregulated genes across AST, IN, EX  in Figure 2c Late versus early pathology,  FDR < 0.01, log2FC > 0.25, 16 genes 
+mathys <- c("HSPA1A","GAPDH","DYNLL1","UBB","FTH1","CRYAB","PTMA","UBC","HSPB1","NDUFA4","STMN1","PCSK1N","COX7C","SH3BFRL3","HSP90AA1","HSPA8")
+mathys <- as.data.frame(mathys)
+write_csv(mathys, paste0("mathys_gprocomp.csv"))
+##GRUBMAN genes upregulated in Neuron and Astrocyte (DEG cluster 5 and 7, source data), absolute log fold change > 1 and FDR < 0.01 
+grubman <- c("BOK","CRYAB","DNAJB2","FKBP5","GFAP","HSPA1A","HSPB1","LINC00486","LINGO1","MT-ATP6","MT-CO2","MT-CO3","MT-CYB","MT-ND1","MT-ND2","MT-ND3","MT-ND4","NEAT1","SPP1","ABCC8","ABLIM1","ADAMTS18","ADCK3","AEBP1","AHNAK","ANLN","ATF4","B3GAT3","BCL6","BCOR","BCYRN1","BIN1","BRSK2","CD163L1","CDK10","CERCAM","CH507-513H4.1","CHD5","CHI3L1","CLK1","CLSTN1","CNTN2","CPSF3L","CRELD1","CRISPLD2","CSPG4","CSRP1","DDB1","DHCR24","DNAJA1","DNAJB1","DPP7","EEF2","EEF2K","FKBP4","GIT1","GPRC5B","GRIN1","HIF3A","HP1BP3","HSP90AA1","HSP90AB1","HSPA1B","HSPH1","ITGB4","KIF19","LAMTOR4","LGI3","LIFR","LSS","MAPK8IP1","MGLL","MICALL2","MT3","MYLPF","NDRG1","NDRG2","NUMA1","PABPN1","PAPOLA","PHYHIP","PLEC","PLOD3","PRNP","PSAP","PTGES3","QDPR","RANGAP1","RAPGEF3","RHPN1","RP3-406A7.7","SEMA3E","SLC26A3","SLC38A2","SLC5A11","SNPH","SRSF6","STIP1","TEF","TMEM259","TMEM63B","TPPP","TSPYL2","TTYH2","TYRO3","WASH1","ZC3H11A","ZFAND5","ZNF692")
+grubman <- as.data.frame(grubman)
+write_csv(grubman, paste0("grubman_gprocomp.csv"))
+##VELMESHEV negative control data set, Fig. 2 a,b highlighted upregulated genes in neuronal and non-neuronal cell types, 22 genes 
+Velmeshev <- c("CHSY3","GLRA3","NEGR1","FSTL5","CDH2","SSBP2","GPATCH8","GABRB1","CH17-472G23.1","RP11-444D3.1","NSD1","GPHN","PACS1","GSK3B","PLEKHG1","PCSK5","RUNDC3B","FBLN1","FARP1","BPTF","USP53","FAF1")
+Velmeshev <- as.data.frame(Velmeshev)
+write_csv(Velmeshev, paste0("velmeshev_gprocomp.csv"))
+#run gpro from CSV
+csv_files <- list.files (pattern    = "*gprocomp.csv", full.names = T)
+for(file in csv_files){
+x<- read.csv(paste0(file), header = FALSE)
+x <- as.character(x$V1)
+gostres <- gost(query = x, 
+                organism = "gp__zSEF_sD9Q_d1M", ordered_query = FALSE, 
+                multi_query = FALSE, significant = FALSE, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = FALSE, 
+                user_threshold = 0.05, correction_method = "fdr", 
+                numeric_ns = "", sources = "GO", as_short_link = FALSE)
+gostres2 <- gostres$result 
+gostres3 <- gostres2[1:13]
+#write.csv 
+write_csv(gostres3, paste0(file,"_gpro.csv"))
+}
+#gs list 
+csv_files <- list.files (pattern   = "*gprocomp.csv_gpro.csv", full.names = T)
+csv_files <- csv_files[1:3]
+toMatch <- c("^GO_", "^REACTOME_", "^KEGG_","^HALLMARK_")
+gs=character()
+for(file in csv_files){
+t<- read.csv(paste0(file), header = TRUE)
+t=t[grep(paste0(toMatch,collapse="|"),t$term_id),]
+t$term_id=as.character(t$term_id)
+t=t[t$p_value<0.05,]
+t=t[t$intersection_size>2,]
+t <-t[order(t$p_value),]
+gs=c(gs,head(t$term_id,10))
+}
+gs=unique(gs)
+#save rds
+saveRDS(gs, file = paste0("GPROCOMP_GS.rds"))
+write_csv(as.data.frame(gs),paste0("GPROCOMP_GS.csv"))
+#heatmap 
+df=data.frame(row.names=gs)
+files <- list.files (pattern   = "*gprocomp.csv_gpro.csv", full.names = T)
+for(file in files){
+res=rep(0,length(gs))
+ressig=rep(0,length(gs))
+t=read.csv(paste0(file))
+t$term_id=as.character(t$term_id)
+rownames(t)=t$term_id
+res[gs %in% t$term_id]=t[gs[gs %in% t$term_id],"p_value"]
+df=cbind(df,res)
+colnames(df)[ncol(df)]=paste0(file)
+}
+log.df <- -log10(df)
+log.df[log.df == Inf] <- 0
+names(log.df)[1] <- "AstTAU"
+names(log.df)[2] <- "Grubman"
+names(log.df)[3] <- "Mathys"
+names(log.df)[4] <- "Velmeshev"
+names(log.df)[5] <- "AstASYN"
+#wrapping strings
+#replace underscore with space in names
+a<-gsub("_", " ", row.names(log.df), fixed=TRUE)
+#replace rownames in log.df
+row.names(log.df) <- a
+#set trim 
+row.names(log.df) <- strtrim(row.names(log.df), width=50)
+#colors
+heatcolor1=brewer.pal(11,"RdYlBu")[2]
+heatcolor2=brewer.pal(11,"RdYlBu")[5]
+#heatmap
+ht<- Heatmap(log.df,
+        name = "-log10(p-value)",
+        column_names_rot=25,
+        column_names_centered = TRUE,
+        row_names_gp = gpar(fontsize =8, face= 'bold'),
+        column_names_side = "top",
+        column_names_gp = gpar(fontsize=12, face='bold'),
+        cluster_columns=F,
+        cluster_rows=F,
+        show_row_dend = FALSE,
+        col=colorRamp2(c(0,1.30102,1.30103,max(log.df)),c("white","white",heatcolor2, heatcolor1)),
+        row_names_max_width = max_text_width( rownames(log.df), gp = gpar(fontsize = 12, face='bold')),
+        heatmap_legend_param = list(direction = "horizontal"))
+ht<- ComplexHeatmap::draw(ht, heatmap_legend_side="bottom")
+pdf(paste0("comp_gpro_heatmap.pdf"))
+ht
+dev.off()
+```
+
+LIGER COMPARATIVE INTEGRATION 
+```{r}
+#load datasets for integration 
+#AstTau 
+load.Rdata("combined_named.RData","x.integrated")
+#Badhuri et al., (2020)
+so_o <- readRDS("./seurat_stress_organoid.rds") 
+#pre-process 
+x.integrated.data <- as.SingleCellExperiment(x.integrated)
+celseq_o.data <- as.SingleCellExperiment(so_o)
+keep_genes <- Reduce(intersect, list(rownames(x.integrated.data),rownames(celseq_o.data)))
+x.integrated.data <- x.integrated.data[match(keep_genes, rownames(x.integrated.data)), ]
+celseq_o.data <- celseq_o.data[match(keep_genes, rownames(celseq_o.data)), ]
+x.integrated.data <- logNormCounts(x.integrated.data)
+celseq_o.data <- logNormCounts(celseq_o.data)
+#normalize
+## x.integrated.data
+# Fitting a trend:
+library(DelayedMatrixStats)
+x.integrated.data.means <- rowMeans(logcounts(x.integrated.data))
+x.integrated.data.vars <- rowVars(logcounts(x.integrated.data))
+fit_x.integrated.data <- fitTrendVar(x.integrated.data.means, x.integrated.data.vars) 
+dec_x.integrated.data <- modelGeneVar(x.integrated.data)
+dec_x.integrated.data$Symbol_TENx <- rowData(x.integrated.data)$Symbol_TENx
+dec_x.integrated.data <- dec_x.integrated.data[order(dec_x.integrated.data$bio, decreasing = TRUE), ]
+## celseq_o.data
+celseq_o.data.means <- rowMeans(logcounts(celseq_o.data))
+celseq_o.data.vars <- rowVars(logcounts(celseq_o.data))
+fit_celseq_o.data <- fitTrendVar(celseq_o.data.means, celseq_o.data.vars) 
+dec_celseq_o.data <- modelGeneVar(celseq_o.data)
+dec_celseq_o.data$Symbol_TENx <- rowData(celseq_o.data)$Symbol_TENx
+dec_celseq_o.data <- dec_celseq_o.data[order(dec_celseq_o.data$bio, decreasing = TRUE), ]
+# select the most informative genes that are shared across all datasets:
+universe <- Reduce(intersect, list(rownames(dec_x.integrated.data),rownames(dec_celseq_o.data)))
+mean.bio <- (dec_x.integrated.data[universe,"bio"] + dec_celseq_o.data[universe,"bio"])/2
+hvg_genes <- universe[mean.bio > 0]
+#x.integrated colData 
+x.integrated.data.ident<-colData(x.integrated.data)$ident
+x.integrated.data.sizeFactor<-colData(x.integrated.data)$sizeFactor
+colData(x.integrated.data)$ident<-NULL
+colData(x.integrated.data)$sizeFactor<-NULL
+colData(x.integrated.data)$Cluster<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Sample<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Line<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Protocol<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Age<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$iPSCorhESC<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Class<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$State<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Type<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$Subtype<-colData(x.integrated.data)$orig.ident
+colData(x.integrated.data)$ident<-x.integrated.data.ident
+colData(x.integrated.data)$sizeFactor<-x.integrated.data.sizeFactor
+colData(x.integrated.data)$new.orig.ident<-colData(x.integrated.data)$sample_id
+#celseq colData 
+celseq_o.data.orig.ident<-colData(celseq_o.data)$orig.ident
+colData(celseq_o.data)$orig.ident<-"stress_organoid"
+celseq_o.data.Cluster<-colData(celseq_o.data)$Cluster
+celseq_o.data.Sample<-colData(celseq_o.data)$Sample
+celseq_o.data.Line<-colData(celseq_o.data)$Line
+celseq_o.data.Protocol<-colData(celseq_o.data)$Protocol
+celseq_o.data.Age<-colData(celseq_o.data)$Age
+celseq_o.data.iPSCorhESC<-colData(celseq_o.data)$iPSCorhESC
+celseq_o.data.Class<-colData(celseq_o.data)$Class
+celseq_o.data.State<-colData(celseq_o.data)$State
+celseq_o.data.Type<-colData(celseq_o.data)$Type
+celseq_o.data.Subtype<-colData(celseq_o.data)$Subtype
+celseq_o.data.ident<-colData(celseq_o.data)$ident
+celseq_o.data.sizeFactor<-colData(celseq_o.data)$sizeFactor
+colData(celseq_o.data)$Cluster<-NULL
+colData(celseq_o.data)$Sample<-NULL
+colData(celseq_o.data)$Line<-NULL
+colData(celseq_o.data)$Protocol<-NULL
+colData(celseq_o.data)$Age<-NULL
+colData(celseq_o.data)$iPSCorhESC<-NULL
+colData(celseq_o.data)$Class<-NULL
+colData(celseq_o.data)$State<-NULL
+colData(celseq_o.data)$Type<-NULL
+colData(celseq_o.data)$Subtype<-NULL
+colData(celseq_o.data)$ident<-NULL
+colData(celseq_o.data)$sizeFactor<-NULL
+colData(celseq_o.data)$percent_mt<-"stress_organoid"
+colData(celseq_o.data)$sample_id<-"stress_organoid"
+colData(celseq_o.data)$batch<-"stress_organoid"
+colData(celseq_o.data)$condition<-"stress_organoid"
+colData(celseq_o.data)$week<-"stress_organoid"
+colData(celseq_o.data)$treatment<-"stress_organoid"
+colData(celseq_o.data)$batch_id<-"stress_organoid"
+colData(celseq_o.data)$integrated_snn_res.0.5<-"stress_organoid"
+colData(celseq_o.data)$seurat_clusters<-"stress_organoid"
+colData(celseq_o.data)$celltype<-"stress_organoid"
+colData(celseq_o.data)$celltype.sample<-"stress_organoid"
+colData(celseq_o.data)$celltype.condition<-"stress_organoid"
+colData(celseq_o.data)$celltype.batch<-"stress_organoid"
+colData(celseq_o.data)$celltype.week<-"stress_organoid"
+colData(celseq_o.data)$celltype.treat<-"stress_organoid"
+colData(celseq_o.data)$celltype.condition.week.treat<-"stress_organoid"
+colData(celseq_o.data)$condition.treat<-"stress_organoid"
+colData(celseq_o.data)$condition.treat.week<-"stress_organoid"
+colData(celseq_o.data)$Cluster<-celseq_o.data.Cluster
+colData(celseq_o.data)$Sample<-celseq_o.data.Sample
+colData(celseq_o.data)$Line<-celseq_o.data.Line
+colData(celseq_o.data)$Protocol<-celseq_o.data.Protocol
+colData(celseq_o.data)$Age<-celseq_o.data.Age
+colData(celseq_o.data)$iPSCorhESC<-celseq_o.data.iPSCorhESC
+colData(celseq_o.data)$Class<-celseq_o.data.Class
+colData(celseq_o.data)$State<-celseq_o.data.State
+colData(celseq_o.data)$Type<-celseq_o.data.Type
+colData(celseq_o.data)$Subtype<-celseq_o.data.Subtype
+colData(celseq_o.data)$ident<-celseq_o.data.ident
+colData(celseq_o.data)$sizeFactor<-celseq_o.data.sizeFactor
+colData(celseq_o.data)$new.orig.ident<-celseq_o.data.orig.ident
+#set colnames 
+colnames(colData(x.integrated.data))
+colnames(colData(celseq_o.data))
+#rm processing files 
+rm(dec_x.integrated.data)
+rm(dec_celseq_o.data)
+rm(fit_x.integrated.data)
+rm(fit_celseq_o.data)
+rm(x.integrated.data.means)
+rm(x.integrated.data.vars)
+rm(celseq_o.data.means)
+rm(celseq_o.data.vars)
+rm(celseq_o.data)
+rm(x.integrated.data)
+#get counts 
+# total raw counts
+counts <- cbind(counts(x.integrated.data), counts(celseq_o.data))
+# total normalized counts (with multibatch normalization)
+logcounts <- cbind(logcounts(x.integrated.data), logcounts(celseq_o.data))
+# sce object of the combined data 
+sce <- SingleCellExperiment( 
+    assays = list(counts = counts, logcounts = logcounts),  
+    rowData = rowData(x.integrated.data), # same as rowData(pbmc4k) 
+    colData = rbind(colData(x.integrated.data), colData(celseq_o.data)) 
+)
+# store the hvg_genes from the prior section into the sce object’s metadata slot via:
+metadata(sce)$hvg_genes <- hvg_genes
+sce <- runPCA(sce,ncomponents = 30)
+sce.seurat <- as.Seurat(sce)
+#rm(sce)
+#clustering workflow 
+sce.seurat <- NormalizeData(sce.seurat)
+sce.seurat <- FindVariableFeatures(sce.seurat)
+sce.seurat <- ScaleData(sce.seurat, split.by = "orig.ident", do.center = FALSE)
+sce.seurat <- RunOptimizeALS(sce.seurat, k = 20, lambda = 5, split.by = "orig.ident")
+sce.seurat <- RunQuantileNorm(sce.seurat, split.by = "orig.ident")
+sce.seurat <- FindNeighbors(sce.seurat, reduction = "iNMF", dims = 1:20)
+sce.seurat <- FindClusters(sce.seurat, resolution = 0.3)
+sce.seurat <- RunUMAP(sce.seurat, dims = 1:ncol(sce.seurat[["iNMF"]]), reduction = "iNMF")
+#save intergrated object 
+saveRDS(sce.seurat, file = "./x.integrated/x_stress_integrated_seurat.rds")
+```
+
+LIGER COMPARATIVE VISUALIZATION 
+```{r}
+data <- readRDS(paste0("path"))
+
+#downsample
+data <- SetIdent(data, value = "orig.ident")
+data_sub <- subset(data,downsample=133228)
+
+#visualize split by cluster  
+pdf("cerebralorganoid_cluster_umap.pdf")
+DimPlot(data_sub, reduction = "umap", label = T, pt.size = 0.2, group.by = "seurat_clusters",  shuffle = T, raster = T, repel = T, label.size = 10)+theme(title = element_text(size = 0)) +theme(text = element_text(face = "bold"))
+dev.off()
+
+#visual cell type markers feature plo t
+features <- c("TOP2A","NES","GAP43","STMN2","GAD1","SLC17A6","VIM","SLC1A3","GFAP")
+pdf("cerebralorganoid_cluster_feature.pdf")
+FeaturePlot(data_sub, features = features, order = T)
+dev.off()
+
+#celltype assignment
+Idents(data_sub)<- data_sub$seurat_clusters
+data_sub <- RenameIdents(data_sub, `0` = "NEU_P", `1` = "NEU", `2` = "NEU_P", `3` = "ASC_P", `4` = "ASC_P", `5` = "ASC", `6` = "NEU", `7` = "NEU_P", `8` = "NEU_P", `9` = "NEU",  `10` = "NEU", `11` = "NEU", `12` = "NEU")
+data_sub$celltype2 <- Idents(data_sub)
+
+#visualize split by cell type  
+Idents(data_sub)<- data_sub$ident 
+pdf("cerebralorganoid_celltype_umap.pdf")
+DimPlot(data_sub, reduction = "umap", label = T, pt.size = 0.2, group.by = "celltype2",  shuffle = T, raster = F, repel = T, label.size = 6)+theme(text = element_text(face = "bold"))+theme(title = element_text(size = 0))
+dev.off()
+
+#visualize split by dataset 
+pdf("cerebralorganoid_comp_umap.pdf")
+DimPlot(data_sub, reduction = "umap", label = F, pt.size = 0.2, group.by = "orig.ident",  shuffle = T, raster = F)+
+  scale_color_manual(labels = c("AstTau", "Cerebral Organoid"),values = c("red","blue"))+theme(title = element_text(size = 0), legend.position = "bottom")
+dev.off()
+#make gradient function
+make_gradient <- function(deg = 45, n = 100, cols = blues9) {
+  cols <- colorRampPalette(cols)(n + 1)
+  rad <- deg / (180 / pi)
+  mat <- matrix(
+    data = rep(seq(0, 1, length.out = n) * cos(rad), n),
+    byrow = TRUE,
+    ncol = n
+  ) +
+  matrix(
+    data = rep(seq(0, 1, length.out = n) * sin(rad), n),
+    byrow = FALSE,
+    ncol = n
+  )
+  mat <- mat - min(mat)
+  mat <- mat / max(mat)
+  mat <- 1 + mat * n
+  mat <- matrix(data = cols[round(mat)], ncol = n)
+  grid::rasterGrob(
+    image = mat,
+    width = unit(1, "npc"),
+    height = unit(1, "npc"), 
+    interpolate = TRUE
+  )
+}
+#count number of cells from each sample in each cluster
+Idents(data_sub) <-"seurat_clusters"
+ident <- c("integration","stress_organoid")
+ns<-length(ident)
+nb<-rep(0,ns) 
+clusters<-levels(data_sub@active.ident)
+ncl<-length(clusters)
+counts<-matrix(0,nrow=ncl,ncol=ns)
+rownames(counts)<-clusters
+colnames(counts)<-ident
+for (s in ident) {
+  for (cl in clusters) {
+    counts[cl,s]<-sum(data_sub@meta.data$orig.ident==s & data_sub@active.ident==cl)
+  }
+}
+write.table(counts,file=paste0("liger_cell_counts.txt"),col.names=NA,sep="\t",quote=FALSE)
+
+#manual gradient of least mature to most mature clusters 
+colors<- c("red","red","orange","yellow","yellow","red","yellow","white","red","orange","red","red","orange","purple","yellow","orange","purple")
+pdf("cerebralorganoid_comp_umap_gradient.pdf")
+DimPlot(data_sub, reduction = "umap", label = F, pt.size = 0.2, group.by = "Subtype",cols = colors, shuffle = F, raster = F)+theme(plot.title =  element_text(size = 0))+ theme(legend.position = "none")
+dev.off()
+
+#reorder seurat cluster rownames to plot cell counts from least mature to most mature 
+counts2 <- as.data.frame(counts)
+counts2$names <- rownames(counts2)
+counts3 <- counts2 %>% arrange(factor(names, levels = c('0','4','3','7','2','11','5','6','8','12','10','1','9')))
+counts3.melt <- melt(counts3, id.var = 'names')
+# plot histogram 
+level_order = c('0','4','3','7','2','11','5','6','8','12','10','1','9')
+g <- make_gradient(
+  deg = 0, n = 500, cols = brewer.pal(12, "YlOrRd")
+)
+g2 <- ggplot(counts3.melt, aes(x = factor(names, level = level_order), y = value))+
+  annotation_custom(
+    grob = g, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf
+  )
+pdf("liger_comp_cellcounts.pdf")
+g2 + geom_bar(aes(fill=variable), colour="white",stat = "identity", width = 0.5 ) + 
+  theme(axis.text.x = element_text(angle=65, vjust=0.6, size = 10), axis.title.x = element_text(size=20), axis.title.y = element_text(size=20), legend.position = "bottom") + 
+  labs(title="", 
+       subtitle="") +
+  scale_fill_manual(labels = c("AstTau", "Cerebral Organoid"),name = "Data Set",  values = c("red","blue") ) +labs(y= "Cell Counts", x = "Cell Cluster")
+dev.off()
+
+
+#STACKED VLN MARKER FIG
+
+#NEW FUNCTION
+
+## remove the x-axis text and tick
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj, 
+                          feature, 
+                          pt.size = 0.0,
+                          plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                          ...) {
+  p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )  + 
+    xlab("") + ylab(feature) + ggtitle("") + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 0),plot.caption = element_text(size = 0),
+          axis.text.x = element_text(size=0), axis.title.x = element_text(size=0),
+          axis.ticks.length.x = unit(0, "pt"),
+          axis.ticks.x = element_blank(),
+          axis.title.y = element_text(size = rel(1), angle = 0, face = "bold"), 
+          axis.text.y = element_text(size = rel(1), face = "bold"),
+          plot.margin = plot.margin ) 
+  return(p)
+}
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0.0, 
+                          plot.margin = unit(c(0, 0, 0, 0), "cm"),
+                          ...) {
+  
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+  
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(size = 15, angle = 35, face= "bold"), axis.ticks.x = element_line())
+  
+  # change the y-axis tick to only max value 
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x +
+                            scale_y_continuous(breaks = c(y)) +
+                            expand_limits(y = y))
+
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1) 
+        
+  return(p)
+}
+
+features <-c("TOP2A","NES","VIM","SLC1A3","PEA15","GAP43","STMN2","SNAP25")
+level <- c(0,4,3,7,2,11,5,6,8,12,10,1,9)
+
+data <- SetIdent(data, value ="seurat_clusters")
+data$seurat_clusters <- factor(x = data$seurat_clusters, levels = level)
+
+data <- SetIdent(data, value ="seurat_clusters")
+plot <- StackedVlnPlot(obj = data, features = features)
+
+pdf("liger_cell_stckvln_celltype.pdf", width= 5, height =5 )
+print(plot)
+dev.off()
+
+```
+
+ONTOLOGY VLN PLOTS
+```{r}
+#WK3 ONLY 
+modulesets <- c("ZAMANIAN_A1_AST","ZAMANIAN_A2_AST","tnf","ribo","HSF1","DAA_FIG2","GRUBMAN","GWAS")
+celltypes <- c("IN_NEU","EX_NEU","ASC")
+#V ONLY 
+fillcolor <- c(col_ctr_v_w3, col_otau_v_w3)
+for (moduleset in modulesets){
+modulename=moduleset
+module= eval(as.symbol(modulename))
+for (ct in celltypes){
+    tryCatch({
+theMean <- colMeans(x = as.matrix(combined[['RNA']]@data[module, ]), na.rm = TRUE)
+combined@meta.data$geneset <- theMean
+combined=SetIdent(combined,value = "celltype.condition.week.treat")
+subsetseurat <- subset(combined,idents=c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v")))
+subsetseurat$celltype.condition.week.treat <- factor(as.character(subsetseurat$celltype.condition.week.treat), levels = c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v")))
+comp.pairs <- list(c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v")))
+p <- VlnPlot(
+    object = subsetseurat, 
+    features = "geneset", 
+    group.by = "celltype.condition.week.treat", 
+    cols = fillcolor,
+    pt.size = 0.01) 
+lim <-ggplot_build(p)$layout$panel_params[[1]]$y.range[2]
+fun_mean <- function(x){  y = mean(x,na.rm=T)
+  return(data.frame(y=lim+0.05,label=round(y,3)))}
+pdf(paste0(modulename,"_",ct,"_v_avg_vio.pdf"))
+print( p+ 
+    ylim(0,lim+0.15)+
+    stat_compare_means(label = "p.signif", 
+                       method = "t.test", hide.ns = TRUE,
+                       comparisons = comp.pairs,
+                        label.y = c(lim,lim,lim), bracket.size = 1, size=25) +
+geom_boxplot(width = 0.2, color="white", outlier.shape = NA, lwd=2) +   
+stat_summary(fun.data = fun_mean, geom="text", color="black",size=10 )+
+    theme(legend.text=element_text(size = 10), 
+     axis.title.x = element_text(size = 0),
+     axis.title.y = element_text(size = 30),
+     axis.text.x = element_text(size = 0),
+     axis.text.y = element_text(size = 25))+
+      ylab("Gene Expression")+
+    labs(title = NULL) +NoLegend())
+dev.off()
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}
+#ALL
+fillcolor <- c(col_ctr_v_w3, col_otau_v_w3,col_ctr_pu_w3, col_otau_pu_w3 )
+for (moduleset in modulesets){
+modulename=moduleset
+module= eval(as.symbol(modulename))
+for (ct in celltypes){
+    tryCatch({
+theMean <- colMeans(x = as.matrix(combined[['RNA']]@data[module, ]), na.rm = TRUE)
+combined@meta.data$geneset <- theMean
+combined=SetIdent(combined,value = "celltype.condition.week.treat")
+subsetseurat <- subset(combined,idents=c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v"),paste0(ct,"_ctr_w3_pu"),paste0(ct,"_otau_w3_pu")))
+subsetseurat$celltype.condition.week.treat <- factor(as.character(subsetseurat$celltype.condition.week.treat), levels = c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v"),paste0(ct,"_ctr_w3_pu"),paste0(ct,"_otau_w3_pu")))
+comp.pairs <- list(c(paste0(ct,"_ctr_w3_v"),paste0(ct,"_otau_w3_v")),c(paste0(ct,"_ctr_w3_pu"),paste0(ct,"_otau_w3_pu")),c(paste0(ct,"_otau_w3_v"),paste0(ct,"_otau_w3_pu")))
+p <- VlnPlot(
+    object = subsetseurat,
+    features = "geneset",
+    group.by = "celltype.condition.week.treat",
+    cols = fillcolor,
+    pt.size = 0.01)
+lim <-ggplot_build(p)$layout$panel_params[[1]]$y.range[2]
+fun_mean <- function(x){  y = mean(x,na.rm=T)
+  return(data.frame(y=lim+0.05,label=round(y,3)))}
+pdf(paste0(modulename,"_",ct,"_all_avg_vio_v2.pdf"))
+print( p+
+      ylim(0,lim+(lim/2))+
+    stat_compare_means(label = "p.signif",
+                       method = "t.test", hide.ns = TRUE,
+                       comparisons = comp.pairs,
+                       bracket.size = 1, 
+                       size=20)+
+                       stat_compare_means(method = "anova", size=5)+
+                       geom_boxplot(width = 0.2, color="white", outlier.shape = NA, lwd=2) +
+stat_summary(fun.data = fun_mean, geom="text", color="black",size=8 )+
+    theme(legend.text=element_text(size = 10),
+     axis.title.x = element_text(size = 0),
+     axis.title.y = element_text(size = 30),
+     axis.text.x = element_text(size = 0),
+     axis.text.y = element_text(size = 25))+
+     ylab("Gene Expression")+
+    labs(title = NULL) +NoLegend())
+dev.off()
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}}
+```
+
+NEURONAL SUBCLUSTER MONOCLE 3 PSEUDOTIME
+```{r}
+
+#subset to neurons
+Idents(combined)<-"celltype"
+subset <- subset(combined, idents=c("EX_NEU"))
+#subset to vehicle only
+Idents(subset)<-"condition.treat.week"
+subset <- subset(subset, idents=c( "ctr_v_w1", "otau_v_w1","ctr_v_w2", "otau_v_w2","ctr_v_w3", "otau_v_w3"))
+
+subset_ct <- FindVariableFeatures(subset, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(subset_ct)
+subset_ct <- ScaleData(subset_ct, features = all.genes)
+subset_ct <- RunPCA(subset_ct, verbose = FALSE)
+subset_ct <- RunUMAP(subset_ct, reduction = "pca", dims = 1:15)
+subset_ct <- FindNeighbors(subset_ct, dims = 1:15, verbose = FALSE)
+subset_ct <- FindClusters(subset_ct, verbose = FALSE)
+
+#Save seurat object
+save(subset_ct,file="subset_GLUNEU.RData")
+
+#load seurat object
+load(file = "subset_GLUNEU.RData")
+CTS <-  "GLU_NEU"
+  
+#setup
+#Condition
+Idents(subset_ct) <- "condition.treat.week"
+# Define an order of cluster identities
+condition_levels <-  c("ctr_v_w1", "otau_v_w1","ctr_v_w2", "otau_v_w2","ctr_v_w3", "otau_v_w3")
+
+# Relevel object@ident
+subset_ct@meta.data$condition.treat.week <- factor(x = subset_ct@meta.data$condition.treat.week, levels = condition_levels)
+#colors
+cond_color_sub <- c(col_ctr_v_w1,col_otau_v_w1,col_ctr_v_w2,col_otau_v_w2,col_ctr_v_w3,col_otau_v_w3)
+#cond_color_sub <- c(col_ctr_v_w3,col_otau_v_w3)
+cond_color_sub2 <- c(col_otau_v_w1,col_otau_v_w2,col_otau_v_w3)
+
+newlabels  <- c("7 DIV3D Control","7 DIV3D oTAU","14 DIV3D Control","14 DIV3D oTAU","21 DIV3D Control","21 DIV3D oTAU")
+newlabelswk<- c("7 DIV3D","14 DIV3D","21 DIV3D")
+
+#umaps
+Idents(subset_ct)<-"seurat_clusters"
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_UMAP.pdf"))
+print(DimPlot(subset_ct))
+dev.off()
+Idents(subset_ct)<-"condition.treat.week"
+pdf(paste0("./subset/",CTS,"/",CTS,"_condition_UMAP.pdf"))
+print(DimPlot(subset_ct, shuffle = T, cols = cond_color_sub))
+dev.off()
+
+#monocle3
+
+cds <-readRDS(paste0( "./subset/",CTS,"/",CTS,"cds.RData"))
+
+#convert seurat object to monocle object 
+cds <- as.cell_data_set(subset_ct, assay = "RNA")
+## Calculate size factors using built-in function in monocle3
+cds <- estimate_size_factors(cds)
+## Add gene names into CDS
+cds@rowRanges@elementMetadata@listData[["gene_short_name"]] <- rownames(subset_ct[["RNA"]])
+
+#PCA and UMAP 
+cds <- preprocess_cds(cds, num_dim = 50)
+
+cds <- reduce_dimension(cds)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_celltype_m3.pdf"))
+plot_cells(cds, color_cells_by="celltype",  trajectory_graph_color = "grey33",label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+ theme(legend.title = element_blank())
+dev.off()
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_condtreatweek_m3.pdf"))
+plot_cells(cds, color_cells_by="condition.treat.week", trajectory_graph_color = "grey33", label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+scale_color_manual( 'Condition',values = cond_color_sub, labels = newlabels)+ theme(legend.title = element_blank())
+dev.off
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_week_m3.pdf"))
+plot_cells(cds, color_cells_by="week", trajectory_graph_color = "grey33", label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+scale_color_manual(values = cond_color_sub2, labels = newlabelswk)+ theme(legend.title = element_blank())
+dev.off()
+
+#cluster 
+cds = cluster_cells(cds, resolution=1e-4)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudocluster_m3.pdf"))
+plot_cells(cds, label_cell_groups=T, group_label_size = 10, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F, trajectory_graph_color = "grey33")+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+#trajectory 
+cds <- learn_graph(cds, use_partition = F)
+
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_trajectory_m3.pdf"))
+plot_cells(cds,
+           color_cells_by = "condition.treat.week",
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE)
+dev.off()
+
+#pseudotime 
+
+plot_cells(cds, color_cells_by = "partition")
+
+cds <- order_cells(cds)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudotime_m3.pdf"))
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+saveRDS(cds, paste0( "./subset/",CTS,"/",CTS,"cds.RData"))
+
+#pseudo deg
+
+res <- graph_test(cds, neighbor_graph="principal_graph", cores=4)
+ids <- row.names(subset(res, q_value < 0.05))
+
+gene_module_df <- find_gene_modules(cds[ids,], resolution=c(10^seq(-6,-1)))
+write_csv(gene_module_df, paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+gene_module_df <-read_csv(paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+cell_group_df <- tibble::tibble(cell=row.names(colData(cds)),
+                                cell_group=cds@clusters$UMAP$clusters)
+
+agg_mat <- aggregate_gene_expression(cds, gene_module_df, cell_group_df)
+row.names(agg_mat) <- stringr::str_c("Module ", row.names(agg_mat))
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudomoduleheatmap_m3.pdf"))
+print(pheatmap::pheatmap(agg_mat,
+                   scale="column", clustering_method="ward.D2"))
+dev.off()
+
+
+#cluster count barplot pseudo clusters 
+
+#table data 
+t <- table(cds@colData$condition.treat.week, cds@clusters$UMAP$clusters)
+#convert to percentage of total
+t <- prop.table(t,margin = 1)
+t <- t*100
+
+rownames(t) <- newlabels
+#document
+write_csv(as.data.frame(t), paste0("./subset/",CTS,"/",CTS,"_pseudocluster_counts.csv"))
+# melt the data frame for plotting
+data.m <- melt(t, id.vars='clusters')
+#plot
+plot<- ggplot(data.m, aes(y = Var1, x = value, fill = as.character(Var2))) +geom_bar(stat = 'identity', width = 1,colour="black") +theme(text = element_text(face = "bold"),legend.text = element_text(size = 10, colour = "black"), axis.text.y = element_text(size = 10, colour = "black", angle = 0), axis.title.y = element_text(size = 0), axis.title.x = element_text(size = 0),legend.position = "bottom", legend.direction = "horizontal")+ theme(panel.background = element_blank())+ 
+  labs(fill='Cluster')+ theme(aspect.ratio = .2)+ guides(fill = guide_legend(nrow = 1))
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudocluster_barplot.pdf"), width = 6)
+print(plot)
+dev.off()
+
+#plot cells 
+
+gene_module_df <- read.csv(paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_mod12_m3.pdf"))
+plot_cells(cds,
+           genes=gene_module_df %>% filter(module %in% c(12)),
+           label_cell_groups=FALSE, show_trajectory_graph=T, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F, trajectory_graph_color = "grey33")+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+
+#gpro
+
+#12
+x <- c("ACOT7","PARK7","ENO1","SLC25A33","HMGN2","NUDC","ATP5IF1","CCDC28B","YARS","SMIM12","TRAPPC3","LSM10","UTP11","EBNA1BP2","AKR1A1","PGM1","GSTM3","POLR3GL","JTB","DPM3","SCAMP3","NAXE","MRPL24","PFDN2","B4GALT3","NDUFS2","UCK2","CCDC181","MRPL55","EIPR1","DDX1","AC016722.3","SNRNP27","DGUOK","PCGF1","AUP1","SMIM37","CCDC115","IMP4","MZT2A","METTL5","OLA1","NUP35","HSPE1","METTL21A","ATIC","MRPL44","EXOSC7","MAP4","RRP9","TNNC1","ATG3","GAP43","RAB7A","MRPL3","SRPRB","DNAJC19","LINC02043","TCTEX1D2","MRFAP1","LINC02265","MRPL1","MRPS18C","PPA2","NDUFC1","LSM6","NDUFAF2","TBCA","HSPA9","MRPL22","RPL26L1","NOP16","NHP2","EEF1E1","C6orf52","MCUR1","HLA-A","MRPS18B","C6orf226","MRPL14","NDUFAF4","SNX3","PKIB","HDDC2","MPC1","AIMP2","GGCT","LSM5","PSMA2","MRPL32","TBRG4","TMEM120A","MDH2","SRI","BUD31","COPS6","POP7","ARF5","AKR1B1","RHEB","SMS","PRDX4","APOO","NBDY","TCEAL8","TSC22D3","IDH3G","EMD","DKC1","ELOC","MRPS28","POLR2K","TSTA3","EXOSC4","CYC1","BOP1","DMAC1","NDUFB6","NUDT2","CCDC107","NANS","RGS3","NDUFA8","TSSC4","CCDC34","COMMD9","FEN1","ARL2","CCDC85B","DRAP1","NDUFV1","NDUFS8","MRPL48","NDUFC2","CWC15","ZPR1","THYN1","CISD1","FAM241B","PPIF","DPCD","FBXL15","PRDX3","UROS","MLF2","AC079601.1","ARF3","C12orf10","AC084033.3","NDUFA12","ERP29","MRPL57","POLR1D","SERP2","NUDT15","SPRYD7","PSMB5","SPTSSA","NDUFB1","IFI27L1","APOPT1","IMP3","ZFAND6","RPS17","POLR3K","SNRNP25","METTL26","STUB1","FAHD1","NTHL1","FLYWCH2","NMRAL1","UBALD1","DEXI","RSL1D1","C16orf45","ALDOA","VKORC1","CFAP20","ATP6V0D1","NOB1","CFDP1","KARS","AC009119.2","TIMM22","YWHAE","C1QBP","PEMT","SLC25A39","ATP5MC1","NME1","SAP30BP","ARL16","MRPL12","PYCR1","MYL12B","IDH3B","DSTN","SMIM26","DUSP15","COMMD7","DYNLRB1","PKIG","PFDN4","TCEA2","ATP5F1D","C19orf24","MYDGF","C19orf70","TUBB4A","CD320","MRPL4","TMEM205","ECSIT","GADD45GIP1","MRPL34","REX1BD","BORCS8","NDUFA13","UQCRFS1","ECH1","PSMC4","BLVRB","TOMM40","AP2S1","TMEM160","RUVBL2","TSEN34","HSPBP1","ISOC2","CCDC106","ZSCAN1","HDHD5","RANBP1","DGCR6L","MIF","SNU13","SOD1","PSMG1","SUMO3")
+
+#GPRO
+gostres <- gost(query = x, 
+                organism = "gp__zSEF_sD9Q_d1M", ordered_query = TRUE, 
+                multi_query = FALSE, significant = T, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = T, 
+                user_threshold = 0.05, correction_method = "fdr", 
+                numeric_ns = "", as_short_link = FALSE)
+gostres2 <- gostres$result 
+gostres3 <- gostres2[1:13]
+#write.csv 
+write_csv(gostres3, paste0("./subset/",CTS,"/",CTS,"_mod12_m3_gpro.csv"))
+
+#select desired databases
+toMatch <- c("HALLMARK", "KEGG", "GO","REACTOME")
+gostres$result=gostres$result[grepl(paste(toMatch, collapse = "|"),gostres$result$term_id),]
+
+# modify the g:Profiler data frame
+gp_mod = gostres$result[,c("query", "source", "term_id",                            
+                           "term_name", "p_value", "query_size",                 
+                           "intersection_size", "term_size",                     
+                           "effective_domain_size", "intersection")]
+
+gp_mod$GeneRatio = paste0(gp_mod$intersection_size,  "/", gp_mod$query_size)
+
+gp_mod$BgRatio = paste0(gp_mod$term_size, "/", gp_mod$effective_domain_size)
+
+names(gp_mod) = c("Cluster", "Category", "Description", "ID", "p.adjust",                
+                  "query_size", "Count", "term_size", "effective_domain_size",           
+                  "geneID", "GeneRatio", "BgRatio")
+
+gp_mod$geneID = gsub(",", "/", gp_mod$geneID)
+gp_mod$Cluster = gsub("query_1", "Module 12", gp_mod$Cluster)
+row.names(gp_mod) = gp_mod$ID
+
+# define as compareClusterResult object
+gp_mod_cluster = new("compareClusterResult", compareClusterResult = gp_mod)
+
+# define as enrichResult object
+gp_mod_enrich  = new("enrichResult", result = gp_mod)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_mod12_m3_gpro_heatmap.pdf"), width = 25, height = 8)
+barplot(gp_mod_enrich, showCategory = 40, font.size = 15) + 
+  ggplot2::facet_grid(~Cluster) +
+  ggplot2::ylab("Intersection size")+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+```
+
+ASTRO SUBCLUSTER MONOCLE 3 PSEUDOTIME
+```{r}
+
+#subset to asc
+Idents(combined)<-"celltype"
+subset <- subset(combined, idents=c("ASC"))
+#subset to vehicle only
+Idents(subset)<-"condition.treat.week"
+subset <- subset(subset, idents=c( "ctr_v_w1", "otau_v_w1","ctr_v_w2", "otau_v_w2","ctr_v_w3", "otau_v_w3"))
+
+subset_ct <- FindVariableFeatures(subset, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(subset_ct)
+subset_ct <- ScaleData(subset_ct, features = all.genes)
+subset_ct <- RunPCA(subset_ct, verbose = FALSE)
+subset_ct <- RunUMAP(subset_ct, reduction = "pca", dims = 1:15)
+subset_ct <- FindNeighbors(subset_ct, dims = 1:15, verbose = FALSE)
+subset_ct <- FindClusters(subset_ct, verbose = FALSE)
+
+#Save seurat object
+save(subset_ct,file="subset_ASCNEU.RData")
+
+#load seurat object
+load(file = "subset_ASCNEU.RData")
+CTS <-  "ASC"
+  
+#setup
+#Condition
+Idents(subset_ct) <- "condition.treat.week"
+# Define an order of cluster identities
+condition_levels <-  c("ctr_v_w1", "otau_v_w1","ctr_v_w2", "otau_v_w2","ctr_v_w3", "otau_v_w3")
+
+# Relevel object@ident
+subset_ct@meta.data$condition.treat.week <- factor(x = subset_ct@meta.data$condition.treat.week, levels = condition_levels)
+#colors
+cond_color_sub <- c(col_ctr_v_w1,col_otau_v_w1,col_ctr_v_w2,col_otau_v_w2,col_ctr_v_w3,col_otau_v_w3)
+cond_color_sub2 <- c(col_otau_v_w1,col_otau_v_w2,col_otau_v_w3)
+
+newlabels  <- c("7 DIV3D Control","7 DIV3D oTAU","14 DIV3D Control","14 DIV3D oTAU","21 DIV3D Control","21 DIV3D oTAU")
+newlabelswk<- c("7 DIV3D","14 DIV3D","21 DIV3D")
+
+#umaps
+Idents(subset_ct)<-"seurat_clusters"
+pdf(paste0("./subset/",CTS,"/",CTS,"_cluster_UMAP.pdf"))
+print(DimPlot(subset_ct))
+dev.off()
+Idents(subset_ct)<-"condition.treat.week"
+pdf(paste0("./subset/",CTS,"/",CTS,"_condition_UMAP.pdf"))
+print(DimPlot(subset_ct, shuffle = T, cols = cond_color_sub))
+dev.off()
+
+#monocle3
+CTS <-  "ASC"
+cds <-readRDS(paste0( "./subset/",CTS,"/",CTS,"cds.RData"))
+
+#convert seurat object to monocle object 
+cds <- as.cell_data_set(subset_ct, assay = "RNA")
+## Calculate size factors using built-in function in monocle3
+cds <- estimate_size_factors(cds)
+## Add gene names into CDS
+cds@rowRanges@elementMetadata@listData[["gene_short_name"]] <- rownames(subset_ct[["RNA"]])
+
+#PCA and UMAP 
+cds <- preprocess_cds(cds, num_dim = 50)
+cds <- reduce_dimension(cds)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_celltype_m3.pdf"))
+plot_cells(cds, color_cells_by="celltype",  trajectory_graph_color = "grey33",label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+ theme(legend.title = element_blank())
+dev.off()
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_condtreatweek_m3.pdf"))
+plot_cells(cds, color_cells_by="condition.treat.week", trajectory_graph_color = "grey33", label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+scale_color_manual( 'Condition',values = cond_color_sub, labels = newlabels)+ theme(legend.title = element_blank())
+dev.off
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_week_m3.pdf"))
+plot_cells(cds, color_cells_by="week", trajectory_graph_color = "grey33", label_cell_groups=FALSE, group_label_size = 0, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F)+theme(text = element_text(face="bold",size=15))+scale_color_manual(values = cond_color_sub2, labels = newlabelswk)+ theme(legend.title = element_blank())
+dev.off()
+
+#cluster 
+cds = cluster_cells(cds, resolution=1e-4)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudocluster_m3.pdf"))
+plot_cells(cds, label_cell_groups=T, group_label_size = 10, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F, trajectory_graph_color = "grey33")+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+#trajectory 
+cds <- learn_graph(cds, use_partition = F)
+
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_trajectory_m3.pdf"))
+plot_cells(cds,
+           color_cells_by = "condition.treat.week",
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE)
+dev.off()
+
+#pseudotime 
+
+plot_cells(cds, color_cells_by = "partition")
+
+cds <- order_cells(cds)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudotime_m3.pdf"))
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)+theme(text = element_text(face="bold",size=15))
+dev.off()
+
+saveRDS(cds, paste0( "./subset/",CTS,"/",CTS,"cds.RData"))
+
+#pseudo deg
+
+res <- graph_test(cds, neighbor_graph="principal_graph", cores=4)
+ids <- row.names(subset(res, q_value < 0.05))
+
+gene_module_df <- find_gene_modules(cds[ids,], resolution=c(10^seq(-6,-1)))
+write_csv(gene_module_df, paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+gene_module_df <-read_csv(paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+cell_group_df <- tibble::tibble(cell=row.names(colData(cds)),
+                                cell_group=cds@clusters$UMAP$clusters)
+
+
+
+agg_mat <- aggregate_gene_expression(cds, gene_module_df, cell_group_df)
+row.names(agg_mat) <- stringr::str_c("Module ", row.names(agg_mat))
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudomoduleheatmap_m3.pdf"))
+print(pheatmap::pheatmap(agg_mat,
+                   scale="column", clustering_method="ward.D2"))
+dev.off()
+
+
+#cluster count barplot pseudo clusters 
+
+t <- table(cds@colData$condition.treat.week, cds@clusters$UMAP$clusters)
+#convert to percentage of total
+t <- prop.table(t,margin = 1)
+t <- t*100
+
+rownames(t) <- newlabels
+#document
+write_csv(as.data.frame(t), paste0("./subset/",CTS,"/",CTS,"_pseudocluster_counts.csv"))
+# melt the data frame for plotting
+data.m <- melt(t, id.vars='clusters')
+#plot
+plot<- ggplot(data.m, aes(y = Var1, x = value, fill = as.character(Var2))) +geom_bar(stat = 'identity', width = 1,colour="black") +theme(text = element_text(face = "bold"),legend.text = element_text(size = 10, colour = "black"), axis.text.y = element_text(size = 10, colour = "black", angle = 0), axis.title.y = element_text(size = 0), axis.title.x = element_text(size = 0),legend.position = "bottom", legend.direction = "horizontal")+ theme(panel.background = element_blank())+ 
+  labs(fill='Cluster')+ theme(aspect.ratio = .2)+ guides(fill = guide_legend(nrow = 1))
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_pseudocluster_barplot.pdf"), width = 6)
+print(plot)
+dev.off()
+
+
+#module analysis expanded 
+
+#load gene module dataframe 
+CTS <-  "ASC"
+cds <-readRDS(paste0( "./subset/",CTS,"/",CTS,"cds.RData"))
+
+gene_module_df <- read.csv(paste0("./subset/",CTS,"/",CTS,"_genemoduledf_pseuo.csv"))
+
+#one modules defining one pseudo cluster manually selected from module heatmap
+modules <- c(62,15,3,64,9,16,19,4,35,42,7,6,13,66,55)
+
+#module feature plot 
+for (mod in modules) {
+pdf(paste0("./subset/",CTS,"/",CTS,"_mod_",mod,"_m3.pdf"))
+print(plot_cells(cds,
+           genes=gene_module_df %>% filter(module %in% c(mod)),
+           label_cell_groups=FALSE, show_trajectory_graph=T, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F, trajectory_graph_color = "grey33")+theme(text = element_text(face="bold",size=15)))
+dev.off()
+}
+
+
+#gpro 
+
+for (mod in modules) {
+  
+#get gene module list   
+df2 <- gene_module_df[gene_module_df[, 2]==mod,]
+x<- paste(df2$id)
+
+#run gpro
+gostres <- gost(query = x,
+                organism = "gp__zSEF_sD9Q_d1M", ordered_query = TRUE,
+                multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                measure_underrepresentation = FALSE, evcodes = T,
+                user_threshold = 0.05, correction_method = "fdr",
+                numeric_ns = "", as_short_link = FALSE)
+gostres2 <- gostres$result
+gostres3 <- gostres2[1:13]
+
+#write.csv
+write_csv(gostres3, paste0("./subset/",CTS,"/",CTS,"_mod_",mod,"_m3_gpro.csv"))
+
+#select desired databases
+toMatch <- c("HALLMARK", "KEGG", "GO","REACTOME")
+gostres$result=gostres$result[grepl(paste(toMatch, collapse = "|"),gostres$result$term_id),]
+
+# modify the g:Profiler data frame
+gp_mod = gostres$result[,c("query", "source", "term_id",
+                           "term_name", "p_value", "query_size",
+                           "intersection_size", "term_size",
+                           "effective_domain_size", "intersection")]
+
+gp_mod$GeneRatio = paste0(gp_mod$intersection_size,  "/", gp_mod$query_size)
+
+gp_mod$BgRatio = paste0(gp_mod$term_size, "/", gp_mod$effective_domain_size)
+
+names(gp_mod) = c("Cluster", "Category", "Description", "ID", "p.adjust",
+                  "query_size", "Count", "term_size", "effective_domain_size",
+                  "geneID", "GeneRatio", "BgRatio")
+
+gp_mod$geneID = gsub(",", "/", gp_mod$geneID)
+gp_mod$Cluster = gsub("query_1", paste0("Module_",mod), gp_mod$Cluster)
+row.names(gp_mod) = gp_mod$ID
+
+# define as compareClusterResult object
+gp_mod_cluster = new("compareClusterResult", compareClusterResult = gp_mod)
+
+# define as enrichResult object
+gp_mod_enrich  = new("enrichResult", result = gp_mod)
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_mod_",mod,"_m3_gpro_heatmap.pdf"), width = 15, height = 8)
+print(barplot(gp_mod_enrich, showCategory = 40, font.size = 15) +
+  ggplot2::facet_grid(~Cluster) +
+  ggplot2::ylab("Intersection size")+theme(text = element_text(face="bold",size=15)))
+dev.off()
+
+}
+
+#42
+x <- c("APOE","SLC6A11","CTSH","LINC00882","MSTN","KCNJ16","MMP14","SLC25A48","LINC01550","CTXND1","EYA2","RAB27B","FDX2","DUSP23","KLF1","NPY","NUPR1","CENPVL3","MSRA","EPHB6","ALDOC","LINC00645","C9orf106","MFGE8","SGCD","CST3","CCL2","PFKP","AL133351.1","LINC01579","RARRES3","CCDC13","SHISA9","SRPX","RAMP1","FIBIN","MMP28","PTGDS","APOL4","LINC00844","NAGS","PTCHD1","C16orf74","CPNE5","BOLA1","NOG","MMD2","EFEMP1","CMTM5","GAS2L1","PLEKHB1","ASTN2","GAS7","DNAH9","HEPN1","GRIA3","PRDM16","NDUFA7","BRINP1","GPER1","SERPINI2","HEPACAM","RAP1GAP","EFEMP2","TRIM47","AL122058.1","CDH13","AL590617.2","AC005476.2","SLC35F4","ANKFN1","RBFOX1","TLCD1","SEMA6D","BBOX1","ERICH2","IQSEC2","DBX2","KANK1","MAOB","MRO","MFAP4","MT3","ACADL","SCN4B","HSPB1","TMEM100","NDRG2","SLC22A18","EMC10","TMEM63B","HSPB8","AC006960.3","RASSF10","TFPI","EYA4","GMPR","BST2","KCNIP2","ZNF843","HNMT","CD38","S100A16","AP001626.1","RWDD3","TSC22D4","TAP1","DBI","SNCG","ASTN1","PMP2","RABIF","GSTM4","SLITRK2","GABBR2","SLC7A10","CAPS2","AL451165.2","SLC6A1","ME1","ARHGAP19-SLIT1","ADD3","MB","MEGF11","PDLIM4","STOM","EGFR","GNG7","PSMB10","HDHD3","BRINP3","AC025171.3","NFIA","AIFM3","VSTM4","KCNIP1","ACSL6","AC007325.4","TIMP4","DTNA","NFIC","CAMK2G","LINC01094","SCARB1","CCDC88B","ELN","PQLC3","BHLHE41","AC007423.1","MCRIP2","UBTD1","CARD19","DTX3L")
+
+pdf(paste0("./subset/",CTS,"/",CTS,"_mod_15_16_m3.pdf"), width = 10)
+print(plot_cells(cds,
+           genes=gene_module_df %>% filter(module %in% c(15,16)),
+           label_cell_groups=FALSE, show_trajectory_graph=F, label_principal_points = F, label_leaves = F, label_roots = F, label_branch_points = F, trajectory_graph_color = "grey33")+theme(text = element_text(face="bold",size=15)))
+dev.off()
+
+```
+
+EPHYS GENES
+```{r}
+
+#paths <- c("vg_ca_c","chol_r","cl_ch","dop_r","gaba_r","glyc_r","ion_glu_r","meta_glu_r","cycl_nucleo_c","ser_r","vg_k_c","rect_k_c","twin_k_c","ca_act_k_c","ryan_r","vg_na_c")
+
+#paths <- c("vg_ca_c","cl_ch","cycl_nucleo_c","vg_k_c","rect_k_c","twin_k_c","ca_act_k_c","vg_na_c")
+
+#concatenate all channel paths 
+newpath <- append(vg_ca_c,cl_ch)
+newpath <- append(newpath, cycl_nucleo_c)
+newpath <- append(newpath, vg_k_c)
+newpath <- append(newpath,rect_k_c)
+newpath <- append(newpath,twin_k_c)
+newpath <- append(newpath,ca_act_k_c)
+newpath <- append(newpath,vg_na_c)
+
+#for plotting all
+
+genes <- newpath
+  
+temp <- combined
+
+DefaultAssay(temp) <- "RNA"
+
+genes = genes[genes %in% rownames(temp@assays$RNA@data)]
+
+temp=SetIdent(temp,value="celltype")
+
+heatcolor=brewer.pal(11,"RdYlBu")
+
+what=AverageExpression(temp,features=genes,verbose=F,slot="scale.data")$RNA
+
+min=quantile(unlist(what),0.1)
+mid=quantile(unlist(what),0.5)
+max=quantile(unlist(what),0.9)
+
+what <- what[,c(4,5,2)]
+
+p <- Heatmap(what,
+             width = unit(6, "cm"),
+             height = unit((.35*length(genes)),"cm"),
+             name="Expression",
+             col=colorRamp2(c(min, 0, max), c("blue", "white", "red")),
+             clustering_method_columns = "ward.D2",
+             cluster_rows=FALSE,
+             cluster_columns=FALSE,
+             show_column_names=T,
+             show_row_names=T,
+             rect_gp = gpar(col = "black", lwd = 2), 
+             show_column_dend = FALSE, 
+             show_row_dend = FALSE, 
+             column_names_rot = 0, 
+             column_names_centered = T,
+             column_title_gp = gpar(fontface="bold"), 
+             column_names_gp = gpar(fontface="bold"), 
+             row_names_gp = gpar(fontface="bold"))
+
+ht_list = p
+p <-draw(p, column_title = "Ion Channel Expression",column_title_gp = gpar(fontface = "bold"))
+
+pdf(paste0("./ephys/all_heatmap.pdf"), height = (.5*length(genes)))
+print(p)
+dev.off()
+
+
+
+#for plotting split by type
+
+for (path in paths) {
+  
+modulename=path
+genes= eval(as.symbol(modulename))
+  
+temp <- combined
+
+DefaultAssay(temp) <- "RNA"
+
+genes = genes[genes %in% rownames(temp@assays$RNA@data)]
+
+temp=SetIdent(temp,value="celltype")
+
+heatcolor=brewer.pal(11,"RdYlBu")
+what=AverageExpression(temp,features=genes,verbose=F,slot="scale.data")$RNA
+min=quantile(unlist(what),0.1)
+mid=quantile(unlist(what),0.5)
+max=quantile(unlist(what),0.9)
+
+what <- what[,c(1,3,2)]
+
+p <- Heatmap(what,
+             width = unit(6, "cm"),
+             height = unit((.5*length(genes)),"cm"),
+             name=modulename,
+             col=colorRamp2(c(min, 0, max), c("blue", "white", "red")),
+             clustering_method_columns = "ward.D2",
+             cluster_rows=FALSE,
+             cluster_columns=FALSE,
+             show_column_names=T,
+             show_row_names=T,
+             rect_gp = gpar(col = "black", lwd = 2), 
+             show_column_dend = FALSE, 
+             show_row_dend = FALSE, 
+             column_names_rot = 0, 
+             column_names_centered = T,
+             column_title_gp = gpar(fontface="bold"), 
+             column_names_gp = gpar(fontface="bold"), 
+             row_names_gp = gpar(fontface="bold"))
+
+ht_list = p
+p <-draw(p, column_title = modulename,column_title_gp = gpar(fontface = "bold"))
+
+pdf(paste0("./ephys/",modulename,"_heatmap.pdf"), height = (1*length(genes)))
+print(p)
+dev.off()
+
+}
+
+#genes
+
+#voltage gated calcium 
+vg_ca_c <- c("CACNA1A","CACNA1B","CACNA1C","CACNA1D","CACNA1E","CACNA1F","CACNA1G","CACNA1H","CACNA1I","CACNA1S","CACNA2D1","CACNA2D2","CACNA2D3","CACNA2D4","CACNB1","CACNB2","CACNB3","CACNB4","CACNG1","CACNG2","CACNG3","CACNG4","CACNG5","CACNG6","CACNG7","CACNG8")
+#subset <- AddModuleScore(object=subset, features = vg_ca_c, ctrl = 5, name = "vg_ca_c")
+
+#cholinergic receptors 
+chol_r <- c("CHRNA1","CHRNA10","CHRNA2","CHRNA3","CHRNA4","CHRNA5","CHRNA6","CHRNA7","CHRNA9","CHRNB1","CHRNB2","CHRNB4","CHRND","CHRNE","CHRNG")
+#"CHRNB3"
+#subset <- AddModuleScore(object=subset, features = chol_r, ctrl = 5, name = "chol_r")
+
+#chloride channels 
+cl_ch <- c("CLCN1","CLCN2","CLCN3","CLCN4","CLCN5","CLCN6","CLCN7","CLCNKB")
+#"CLCNKA",
+#subset <- AddModuleScore(object=subset, features = cl_ch, ctrl = 5, name = "cl_ch")
+
+#dopamine receptors 
+dop_r <- c("DRD2","DRD4","DRD5")
+#"DRD1","DRD3"
+#subset <- AddModuleScore(object=subset, features = dop_r, ctrl = 5, name = "dop_r")
+
+#gaba receptors
+gaba_r <- c("GABBR1","GABBR2","GABRA1","GABRA2","GABRA3","GABRA4","GABRA5","GABRA6","GABRB1","GABRB2","GABRB3","GABRD","GABRE","GABRG1","GABRG2","GABRG3","GABRP","GABRQ","GABRR1","GABRR2")
+#subset <- AddModuleScore(object=subset, features = gaba_r, ctrl = 5, name = "gaba_r")
+
+#glycine receptors 
+glyc_r <- c("GLRA1","GLRA2","GLRA3","GLRB","GRIA1","GRIA2","GRIA3","GRIA4")
+#"GCOM1",
+#subset <- AddModuleScore(object=subset, features = glyc_r, ctrl = 5, name = "glyc_r")
+
+#ionotropic glutamate receptors 
+ion_glu_r <- c("GRID1","GRID2","GRIK1","GRIK2","GRIK3","GRIK4","GRIK5","GRIN1","GRIN2A","GRIN2B","GRIN2C","GRIN2D","GRIN3A","GRINA")
+#subset <- AddModuleScore(object=subset, features = ion_glu_r, ctrl = 5, name = "ion_glu_r")
+
+#metabotropic glutatmate receptors
+meta_glu_r <- c("GRM1","GRM2","GRM3","GRM4","GRM5","GRM6","GRM7","GRM8")
+#subset <- AddModuleScore(object=subset, features = meta_glu_r, ctrl = 5, name = "meta_glu_r")
+
+#cyclic nucleotide gated channel 
+cycl_nucleo_c <- c("HCN1","HCN2","HCN3","HCN4")
+#subset <- AddModuleScore(object=subset, features = cycl_nucleo_c, ctrl = 5, name = "cycl_nucleo_c")
+
+#serotonin receptors
+ser_r <- c("HTR1B","HTR1D","HTR1E","HTR1F","HTR2A","HTR2C","HTR3B","HTR3E","HTR7")
+#"HTR1A","HTR3A","HTR3C","HTR3D","HTR4","HTR5A","HTR6"
+#subset <- AddModuleScore(object=subset, features = ser_r, ctrl = 5, name = "ser_r")
+
+#voltage gated potassium channels 
+vg_k_c <-c("KCNA1","KCNA2","KCNA3","KCNA4","KCNA5","KCNA7","KCNAB1","KCNAB2","KCNAB3","KCNB1","KCNB2","KCNC1","KCNC2","KCNC3","KCNC4","KCND1","KCND2","KCND3","KCNE1","KCNE2","KCNE3","KCNE4","KCNF1","KCNG1","KCNG2","KCNG3","KCNG4","KCNH1","KCNH2","KCNH3","KCNH4","KCNH5","KCNH6","KCNH7","KCNH8","KCNQ1","KCNQ2","KCNQ3","KCNQ4","KCNQ5","KCNRG","KCNS1","KCNS2","KCNS3","KCNT1","KCNV1","KCNV2")
+#"KCNA10","KCNA6","KCNE1L",
+#subset <- AddModuleScore(object=subset, features = vg_k_c, ctrl = 5, name = "vg_k_c")
+
+#potassium inward rectifying channel 
+rect_k_c <- c("KCNJ1","KCNJ10","KCNJ11","KCNJ12","KCNJ14","KCNJ15","KCNJ16","KCNJ2","KCNJ3","KCNJ4","KCNJ5","KCNJ6","KCNJ8","KCNJ9")
+#subset <- AddModuleScore(object=subset, features = rect_k_c, ctrl = 5, name = "rect_k_c")
+
+#twin pore potassium channel
+twin_k_c <- c("KCNK1","KCNK10","KCNK12","KCNK13","KCNK15","KCNK17","KCNK2","KCNK3","KCNK4","KCNK5","KCNK6","KCNK7","KCNK9")
+#subset <- AddModuleScore(object=subset, features = twin_k_c, ctrl = 5, name = "twin_k_c")
+#"KCNK16"
+
+#calcium activated potassium channel
+ca_act_k_c <- c("KCNMA1","KCNMB2","KCNMB3","KCNMB4","KCNN1","KCNN2","KCNN3","KCNN4")
+#subset <- AddModuleScore(object=subset, features = ca_act_k_c, ctrl = 5, name = "ca_act_k_c")
+
+#ryanodine receptor
+ryan_r <- c("RYR1","RYR2","RYR3")
+#subset <- AddModuleScore(object=subset, features = ryan_r, ctrl = 5, name = "ryan_r")
+
+#voltage gated sodium channel genes 
+vg_na_c <- c("SCN11A","SCN1B","SCN2B","SCN3A","SCN3B","SCN4B","SCN5A","SCN7A","SCN8A","SCN9A","SCN1A")
+#"SCN10A","SCN2A2","SCN4A"
+#subset <- AddModuleScore(object=subset, features = vg_na_c, ctrl = 5, name = "vg_na_c")
+
+
+
+#plot
+
+
+#paths <- c("vg_ca_c","chol_r","cl_ch","dop_r","gaba_r","glyc_r","ion_glu_r","meta_glu_r","cycl_nucleo_c","ser_r","vg_k_c","rect_k_c","twin_k_c","ca_act_k_c","ryan_r","vg_na_c")
+
+paths <- c("vg_ca_c","cl_ch","cycl_nucleo_c","vg_k_c","rect_k_c","twin_k_c","ca_act_k_c","vg_na_c")
+
+#pathway <- c(vg_ca_c,chol_r,cl_ch,dop_r,gaba_r,glyc_r,ion_glu_r,meta_glu_r,cycl_nucleo_c,ser_r,vg_k_c,rect_k_c,twin_k_c,ca_act_k_c,ryan_r,vg_na_c)
+
+
+#feature plot 
+for (path in paths) {
+  
+pdf(paste0("./ephys/",path,"_feature.pdf"))
+
+print(FeaturePlot(subset, features = paste0(path,"1"), min.cutoff = 0, order = T, raster = F)+theme(text = element_text(face = "bold"))+labs(title = path))
+
+dev.off()
+
+}
+
+
+
+
+
+```
+
+SYNAPTIC MARKERS
+```{r}
+
+synaptic <- c("RAB14","DLG4","SNCA","SYN1","NRXN3","STX1A","NLGN1","HOMER1", "GAP43","SYP","SNAP25")
+
+#dot plot 
+
+conds <- c("ctr","otau")
+combined=SetIdent(combined,value="condition")
+subset=subset(combined,idents=conds)
+
+synaptic <- c("SYN1","NRXN3","RAB14","DLG4","SNCA","STX1A","NLGN1","HOMER1")
+
+plot<- DotPlot(subset, features = synaptic , cluster.idents = F, cols = c("blue", "red"), dot.scale = 15,scale.by = "size")+
+  theme(text=element_text(face="bold"),axis.text.x = element_text(size=10, angle = 90), legend.position = "bottom", legend.text = element_text(size = 10), legend.title = element_text(size = 10))+  labs(y="Condition",x="Genes")+theme(aspect.ratio = .2)
+
+pdf("./gwas/synaptic_dotplot.pdf")
+print(plot)
+dev.off()
+```
+                                                                                                                                          SEURAT OBJECT FILE OUTPUT 
+```{r}
+#for Broad Single Cell Portal Submission 
+#metadata- rename CELL_1... in excel and add additional required columns 
+write.csv(combined@meta.data, file = "asteroid1_meta.csv")
+#reducation- rename CELL_1... in excel 
+write.csv(combined@reductions$umap@cell.embeddings, file = "asteroid1_reductions.csv")
+#normalized data matrix 
+memory.size(max=TRUE)
+a=combined@assays$RNA@data
+colnames(a)=paste0("CELL_",1:ncol(a))
+#count matrix - UMI corrected raw counts 
+memory.size(max=TRUE)
+a=combined@assays$RNA@counts
+colnames(a)=paste0("CELL_",1:ncol(a))
+write10xCounts(path="count_matrix", type = "sparse",x = a) 
+
+#for NIH GEO Submission 
+#count matrix - UMI corrected raw counts 
+memory.size(max=TRUE)
+a=combined@assays$RNA@counts
+write10xCounts(path="count_matrix_GEO", type = "sparse",x = a) 
+```
